@@ -2,6 +2,8 @@
 reports/
 *.zip
 install.log
+# CI 与本地临时取回的账本副本，真身在 ops/metrics 分支
+.ledger/
 
 # ---- Python ----
 __pycache__/

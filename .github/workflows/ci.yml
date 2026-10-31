@@ -44,7 +44,11 @@ jobs:
       - name: 取回 ledger（G3/G4 要历史）
         run: |
           mkdir -p .ledger
-          git fetch --depth=1 origin ops/metrics
+          # 刻意不加 --depth=1：浅取会在 .git/shallow 里留下边界，
+          # 之后 `git log` 在该 commit 处直接截断、`%p` 显示为空，
+          # 看起来像「这是个孤儿根提交」—— 2026-11-01 本地就这么被骗过一次。
+          # 这个分支只有 2 个文件，全量取回没有成本。
+          git fetch origin ops/metrics
           git show FETCH_HEAD:ops/blocked-ledger.jsonl > .ledger/blocked-ledger.jsonl
           echo "已取回 $(wc -l < .ledger/blocked-ledger.jsonl) 行历史"
 

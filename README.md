@@ -137,13 +137,13 @@ conftest.py                 浏览器上下文、scope 标记、blocked→xfail�
 
 ---
 
-## 七、本轮实测结果（2026-10-31 23:59，`-m ui` 口径）
+## 七、本轮实测结果（2026-11-01 00:06，M1-2 合入后，`-m ui` 口径）
 
 ```
-1 skipped, 27 deselected, 4 xfailed, 1 warning in 10.04s
-XFAIL   test_train_search[chromium-sh-bj-T+7-2026-11-07]  - blocked: waf_block（whaleguard）
-XFAIL   test_train_search[chromium-gz-sz-T+10-2026-11-10] - blocked: waf_block（whaleguard）
-XFAIL   test_train_search[chromium-hz-nj-T+13-2026-11-13] - blocked: waf_block（whaleguard）
+1 skipped, 27 deselected, 4 xfailed, 1 warning in 6.47s
+XFAIL   test_train_search[chromium-sh-bj-T+7-2026-11-08]  - blocked: waf_block（whaleguard）
+XFAIL   test_train_search[chromium-gz-sz-T+10-2026-11-11] - blocked: waf_block（whaleguard）
+XFAIL   test_train_search[chromium-hz-nj-T+13-2026-11-14] - blocked: waf_block（whaleguard）
 XFAIL   test_smoke::test_homepage_reachable[chromium]      - blocked: waf_block（whaleguard）
 SKIPPED test_calendar_widget                              - known-limit: K-01 日历控件唤不起
 ```
@@ -154,6 +154,9 @@ SKIPPED test_calendar_widget                              - known-limit: K-01 �
 scope=ui  total=5  counted=4  blocked=4  pass=0  failed=0  known-limit=1  ratio=100.0%
 verdict: RED   触发: G1, G2
 ```
+
+对应的记录已写进 `ops/metrics` 分支（第 2 行，v1 schema），追加方式：
+父提交指向当时 tip，快进 push，再从远端读回逐行校验。
 
 注意 `total=5` 与 `counted=4` 的差：K-01 那条 skip 不进分母，
 所以 `ratio` 是 4/4 而不是 4/5 —— 这是口径，不是笔误（见 `docs/BLOCKED-GATE.md` §2）。
