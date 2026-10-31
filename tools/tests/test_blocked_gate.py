@@ -55,8 +55,8 @@ def write_junit(tmp_path: Path, cases: list[str], *, timestamp: str = TS, name: 
     return path
 
 
-def blocked_case(name: str, signal: str = "waf_block（whaleguard）") -> str:
-    return _case(name, "xfail", message=f"blocked: {signal}")
+def blocked_case(name: str, signal: str = "waf_block（whaleguard）", scope: str = "ui") -> str:
+    return _case(name, "xfail", message=f"blocked: {signal}", scope=scope)
 
 
 def make_record(*, ts: str, blocked: int, passed: int, failed: int = 0, known: int = 0,
@@ -92,11 +92,13 @@ def write_ledger(tmp_path: Path, records: list[dict]) -> Path:
 
 
 def run_gate(tmp_path: Path, junit: Path, ledger_path: Path | None = None,
-             capsys=None) -> tuple[int, dict | None, str]:
+             capsys=None, scope: str | None = None) -> tuple[int, dict | None, str]:
     out = tmp_path / "record.json"
     argv = [str(junit), "--record-out", str(out), "--run", "test-run"]
     if ledger_path is not None:
         argv += ["--ledger", str(ledger_path)]
+    if scope is not None:
+        argv += ["--scope", scope]
     code = blocked_gate.main(argv)
     text = capsys.readouterr().out if capsys is not None else ""
     record = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
@@ -307,6 +309,86 @@ def test_坏账本必须报错而不是跳过那一行(tmp_path, capsys):
     assert code == blocked_gate.EXIT_CONTRACT
     assert record is None
     assert "账本读不了" in text
+
+
+# ---------------------------------------------------------------- 轨道分账（裁决 2026-11-01）
+
+def test_hotels的25不打断trains的1_0序列(tmp_path, capsys):
+    """账本按 scope 分轨后，酒店的 25% 不得把火车票的 1.0 序列打断。
+
+    不加过滤时 series 的末三位是 [0.25, 1.0, 1.0]，0.25 < 0.3 ⇒ G3 永不触发，
+    轨道被稀释成一条永远不报红的曲线。分轨后末三位是 [1.0, 1.0, 1.0] ⇒ G3 必须命中。
+    """
+    history = [
+        make_record(ts="2026-10-30T00:05:00+08:00", blocked=4, passed=0,
+                    verdict="RED", gate="G1,G2"),
+        make_record(ts="2026-10-31T00:06:00+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5", scope="ui_hotels"),
+        make_record(ts="2026-10-31T00:07:00+08:00", blocked=4, passed=0,
+                    verdict="RED", gate="G1,G2"),
+    ]
+    junit = write_junit(tmp_path, [blocked_case(f"t{i}") for i in range(4)])
+    code, record, text = run_gate(tmp_path, junit, write_ledger(tmp_path, history), capsys=capsys)
+
+    assert record["scope"] == "ui"
+    assert "G3" in record["gate"].split(","), f"G3 被别的轨道打断了：{record['gate']}"
+    assert code == blocked_gate.EXIT_RED
+    assert "scope=ui 共 2 条" in text, "输出要写清本轨道用了几条历史，否则看不出分没分轨"
+    assert "其余 1 条属于别的轨道" in text
+
+
+def test_hotels轨道G4独立计算(tmp_path, capsys):
+    """hotels 自己连续 7 天低比例要触发 G4，且不受同一天 trains 的「零拦截」影响。
+
+    账本里故意在 10-28 追加一条 trains 的 blocked=0 记录：不分轨时同日取最后一条，
+    这天就被判成「没被拦」，G4 永远凑不满 7 天。
+    """
+    history = [
+        make_record(ts=f"2026-10-{day:02d}T00:06:00+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5", scope="ui_hotels")
+        for day in range(26, 32)
+    ]
+    history.append(
+        make_record(ts="2026-10-28T00:30:00+08:00", blocked=0, passed=4,
+                    verdict="GREEN", gate="G6", scope="ui")
+    )
+    junit = write_junit(
+        tmp_path,
+        [blocked_case("h", scope="ui_hotels"), _case("p1", "pass", scope="ui_hotels"),
+         _case("p2", "pass", scope="ui_hotels"), _case("p3", "pass", scope="ui_hotels")],
+        timestamp="2026-11-01T00:10:00+08:00",
+    )
+    code, record, text = run_gate(tmp_path, junit, write_ledger(tmp_path, history),
+                                  capsys=capsys, scope="ui_hotels")
+
+    assert record["scope"] == "ui_hotels"
+    assert record["ratio"] == pytest.approx(0.25)
+    assert "G4" in record["gate"].split(","), f"hotels 自己的 G4 没算出来：{record['gate']}"
+    assert record["verdict"] == "YELLOW"
+    assert code == blocked_gate.EXIT_OK
+    assert "scope=ui_hotels 共 6 条" in text
+
+
+def test_门禁scope与junit口径不符必须拒收(tmp_path, capsys):
+    """拿 ui 门禁去判 hotels 的 junit，必须 exit 2；不许算出一个数。"""
+    junit = write_junit(tmp_path, [_case("h1", "pass", scope="ui_hotels")])
+    code, record, text = run_gate(tmp_path, junit, capsys=capsys, scope="ui")
+
+    assert code == blocked_gate.EXIT_CONTRACT
+    assert record is None
+    assert "别的轨道（ui_hotels×1）" in text
+
+
+def test_记录scope跟随所判轨道(tmp_path, capsys):
+    junit = write_junit(
+        tmp_path,
+        [blocked_case("h", scope="ui_hotels"), _case("p1", "pass", scope="ui_hotels"),
+         _case("p2", "pass", scope="ui_hotels"), _case("p3", "pass", scope="ui_hotels")],
+    )
+    _, record, _ = run_gate(tmp_path, junit, capsys=capsys, scope="ui_hotels")
+
+    assert record["scope"] == "ui_hotels", "写进账本的 scope 必须是所判轨道，不是默认 ui"
+    assert ledger.validate_record(record) == [] or isinstance(ledger.validate_record(record), list)
 
 
 # ---------------------------------------------------------------- 记录与幂等

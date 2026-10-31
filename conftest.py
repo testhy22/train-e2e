@@ -34,8 +34,14 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """给每条用例盖上 scope 属性，随 junit 一起落盘，供门禁读取。
 
-    scope=ui   → 驱动浏览器的用例，计入 blocked 门禁
-    scope=unit → 数据层单测，门禁必须拒收（tools/blocked_gate.py 的 SCOPE_VIOLATION）
+    scope=ui_hotels → hotels 轨道（www.ctrip.com 首页酒店模块），账本里独立一条序列
+    scope=ui        → 其余浏览器用例（火车票），账本里另一条序列
+    scope=unit      → 数据层单测，门禁必须拒收
+
+    **为什么按标记分轨而不是共用一个 ui**（裁决 2026-11-01）：两条轨道打的是
+    两个站点，拦截率不可比。共用一个 scope 时，酒店那条 25% 会把火车票的
+    1.0 序列打断——G3（连续 3 次 ≥0.3）和 G4（连续 7 天 ≥0.1）会跨轨道串味。
+    标记优先取 `hotels`：酒店用例同时带 `ui`（也算浏览器用例），必须先判细分的那条。
 
     为什么不用目录名 / classname 判断：junit 的 classname 是 rootdir 相对路径，
     在别的 rootdir 下跑一次就变；`user_properties` 是跟着用例走的，与调用方式无关。
@@ -43,9 +49,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     `<properties><property name="scope" value="ui"/></properties>`，pass / xfail / fail 三种结果都写。
     """
     for item in items:
-        item.user_properties.append(
-            ("scope", "ui" if item.get_closest_marker("ui") else "unit")
-        )
+        if item.get_closest_marker("hotels"):
+            scope = "ui_hotels"
+        elif item.get_closest_marker("ui"):
+            scope = "ui"
+        else:
+            scope = "unit"
+        item.user_properties.append(("scope", scope))
 
 
 # ---------------------------------------------------------------- 浏览器上下文

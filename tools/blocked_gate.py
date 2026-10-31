@@ -33,7 +33,10 @@ import ledger
 PREFIX_BLOCKED = "blocked:"
 PREFIX_KNOWN_LIMIT = "known-limit:"
 
-SCOPE = "ui"          # 本门禁只认 ui；unit 混进来直接判契约不成立
+# 本门禁一次只判一条轨道；junit 里出现别的轨道（含 unit）直接判契约不成立。
+# 轨道清单与账本共用一份（ledger.GATE_SCOPES），避免两边各记一套。
+DEFAULT_SCOPE = "ui"
+GATE_SCOPES = ledger.GATE_SCOPES
 REQUIRED_SCOPE_TAG = "scope"
 
 # 阈值。**全部未校准**，ledger 攒够 14 天真实数据后重算并把依据写回 docs/BLOCKED-GATE.md §6.4。
@@ -116,24 +119,28 @@ def _scope_of(node: ET.Element) -> str | None:
     return None
 
 
-def aggregate(path: Path) -> tuple[Stats, list[str]]:
-    """解析 + 校验口径，返回统计与契约问题清单（非空即 exit 2）。"""
+def aggregate(path: Path, scope: str = DEFAULT_SCOPE) -> tuple[Stats, list[str]]:
+    """解析 + 校验口径，返回统计与契约问题清单（非空即 exit 2）。
+
+    `scope` 是本门禁要判的那条轨道。junit 是 `pytest -m <轨道>` 产出的，
+    里面每一条的 scope 属性都必须等于它，否则就是口径混算。
+    """
     if not path.is_file():
         raise ContractError(f"找不到 junit：{path}（先跑 pytest ... --junitxml={path}）")
     root = ET.parse(path).getroot()
 
     stats = Stats()
     problems: list[str] = []
-    unit_seen = 0
+    other_scopes: Counter[str] = Counter()
     missing_scope = 0
 
     for node in root.iter("testcase"):
         label = f"{node.get('classname', '')}::{node.get('name', '')}"
-        scope = _scope_of(node)
-        if scope is None:
+        case_scope = _scope_of(node)
+        if case_scope is None:
             missing_scope += 1
-        elif scope != SCOPE:
-            unit_seen += 1
+        elif case_scope != scope:
+            other_scopes[case_scope] += 1
 
         case = parse_one(node)
         stats.total += 1
@@ -163,11 +170,13 @@ def aggregate(path: Path) -> tuple[Stats, list[str]]:
         else:
             stats.effective_pass += 1
 
-    if unit_seen:
+    if other_scopes:
+        seen = "、".join(f"{name}×{count}" for name, count in sorted(other_scopes.items()))
         problems.append(
-            f"junit 里混入了 {unit_seen} 条 scope!=ui 的用例（共 {stats.total} 条）。"
-            "门禁只吃 `pytest -m ui` 产出的那份 junit；混算会把 ratio 稀释到无意义"
-            "（31 条口径下 ratio 只有 12.9%，G1/G2 双双失守）"
+            f"junit 里混入了 {sum(other_scopes.values())} 条别的轨道（{seen}），"
+            f"本次要判的是 scope={scope}（共 {stats.total} 条）。"
+            f"门禁只吃 `pytest -m <轨道>` 产出的那份 junit；混算会把 ratio 稀释到无意义"
+            "（31 条口径下 ratio 只有 12.9%，G1/G2 双双失守），也会让 G3/G4 跨轨道串味"
         )
     if missing_scope:
         problems.append(
@@ -203,11 +212,17 @@ def _signal_of(message: str) -> str:
 
 # ---------------------------------------------------------------- 判定
 
-def evaluate(stats: Stats, history: list[dict], today: date) -> tuple[str, list[str], list[str]]:
+def evaluate(
+    stats: Stats, history: list[dict], today: date, scope: str = DEFAULT_SCOPE
+) -> tuple[str, list[str], list[str]]:
     """逐条计算所有判定（**不短路**），返回 (verdict, 触发的编号, 不可用的说明)。
 
     为什么不做"命中即停"：G1 与 G2 常常同时成立，只报第一个会让人以为修掉一条就能变绿。
     看板要看的是"同时命中几条"。
+
+    **G3/G4 只在同一 scope 内累计**（裁决 2026-11-01）：火车票与酒店打的是两个站点，
+    拦截率不可比。混在一起算时，酒店的一条 25% 会把火车票的 1.0 序列打断，
+    G3 永远不会触发 —— 那不是"阈值灵敏"，那是阈值被稀释。
     """
     triggered: list[str] = []
     unavailable: list[str] = []
@@ -228,17 +243,17 @@ def evaluate(stats: Stats, history: list[dict], today: date) -> tuple[str, list[
     if not small and stats.counted >= T_MIN_SAMPLE and stats.ratio >= T_RATIO_HIGH:
         triggered.append("G2")
 
-    ui_history = [r for r in history if r.get("scope") == SCOPE]
+    track_history = [r for r in history if r.get("scope") == scope]
     if small:
         unavailable.append(f"counted={stats.counted} < {T_MIN_SAMPLE}，G2/G3/G4 按小样本豁免关闭")
     else:
-        series = [float(r["ratio"]) for r in ui_history] + [stats.ratio]
+        series = [float(r["ratio"]) for r in track_history] + [stats.ratio]
         if len(series) >= T_TREND_RUNS and all(r >= T_RATIO_TREND for r in series[-T_TREND_RUNS:]):
             triggered.append("G3")
 
         window_start = today - timedelta(days=T_CHRONIC_DAYS - 1)
         by_day: dict[date, dict] = {}
-        for record in ui_history:
+        for record in track_history:
             day = datetime.fromisoformat(record["ts"]).date()
             if window_start <= day <= today:
                 by_day[day] = record          # 同一天多条取最后一条
@@ -249,7 +264,8 @@ def evaluate(stats: Stats, history: list[dict], today: date) -> tuple[str, list[
             triggered.append("G4")
         elif len(by_day) < T_CHRONIC_DAYS:
             unavailable.append(
-                f"最近 {T_CHRONIC_DAYS} 天只有 {len(by_day)} 天有记录，G4 不可用（不是不触发）"
+                f"最近 {T_CHRONIC_DAYS} 天只有 {len(by_day)} 天有 scope={scope} 的记录，"
+                f"G4 不可用（不是不触发）"
             )
 
     if not small and stats.blocked >= 1 and not triggered:
@@ -271,13 +287,14 @@ def evaluate(stats: Stats, history: list[dict], today: date) -> tuple[str, list[
 
 # ---------------------------------------------------------------- 记录
 
-def build_record(stats: Stats, verdict: str, gates: list[str], *, ts: str, run: str, source: str, note: str) -> dict:
+def build_record(stats: Stats, verdict: str, gates: list[str], *, ts: str, run: str, source: str,
+                 note: str, scope: str = DEFAULT_SCOPE) -> dict:
     return {
         "schema_version": ledger.SCHEMA_VERSION,
         "ts": ledger.normalize_ts(ts),
         "run": run,
         "source": source,
-        "scope": SCOPE,
+        "scope": scope,
         "total": stats.total,
         "counted": stats.counted,
         "blocked": stats.blocked,
@@ -307,17 +324,22 @@ def junit_ts(path: Path) -> str:
 
 # ---------------------------------------------------------------- 输出
 
-def render(stats: Stats, verdict: str, gates: list[str], unavailable: list[str], problems: list[str]) -> str:
+def render(
+    stats: Stats, verdict: str, gates: list[str], unavailable: list[str], problems: list[str],
+    scope: str = DEFAULT_SCOPE, history_note: str = "",
+) -> str:
     mark = "  [provisional：阈值未校准，见 docs/BLOCKED-GATE.md §6]" if PROVISIONAL else ""
     lines = [
         f"blocked 门禁{mark}",
         (
-            f"  scope={SCOPE}  total={stats.total}  counted={stats.counted}  "
+            f"  scope={scope}  total={stats.total}  counted={stats.counted}  "
             f"blocked={stats.blocked}  pass={stats.effective_pass}  failed={stats.failed}  "
             f"known-limit={stats.known_limit}  ratio={stats.ratio:.1%}"
         ),
-        f"  verdict: {verdict}   触发: {', '.join(gates) or '(无)'}",
     ]
+    if history_note:
+        lines.append(f"  {history_note}")
+    lines.append(f"  verdict: {verdict}   触发: {', '.join(gates) or '(无)'}")
     if stats.top_signal:
         lines.append(f"  主要信号: {stats.top_signal}")
     for item in unavailable:
@@ -354,6 +376,8 @@ def annotate(verdict: str, stats: Stats, gates: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="blocked 门禁判定器（规范见 docs/BLOCKED-GATE.md）")
     parser.add_argument("junit", type=Path)
+    parser.add_argument("--scope", default=DEFAULT_SCOPE, choices=list(GATE_SCOPES),
+                        help=f"本次要判的轨道（默认 {DEFAULT_SCOPE}）；junit 里混入别的轨道直接 exit 2")
     parser.add_argument("--ledger", type=Path, help="历史记录（jsonl），用于 G3/G4；缺省则两条判为不可用")
     parser.add_argument("--record-out", type=Path, default=Path("reports/gate-record.json"))
     parser.add_argument("--ts", help="覆盖 ts，默认取 junit 的 testsuite timestamp")
@@ -363,14 +387,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        stats, problems = aggregate(args.junit)
+        stats, problems = aggregate(args.junit, args.scope)
     except ContractError as exc:
         print(f"契约不成立：{exc}")
         print("::error::blocked 门禁无法判定（契约问题）" if os.getenv("GITHUB_ACTIONS") == "true" else "")
         return EXIT_CONTRACT
 
     if problems:
-        print(render(stats, "CONTRACT", [], [], problems))
+        print(render(stats, "CONTRACT", [], [], problems, scope=args.scope))
         if os.getenv("GITHUB_ACTIONS") == "true":
             print(f"::error::blocked 门禁无法判定：{problems[0]}")
         return EXIT_CONTRACT
@@ -395,11 +419,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ts 不合法：{exc}")
         return EXIT_CONTRACT
 
-    verdict, gates, unavailable = evaluate(stats, history, today)
-    print(render(stats, verdict, gates, unavailable, []))
+    track_rows = sum(1 for r in history if r.get("scope") == args.scope)
+    history_note = (
+        f"轨道历史：scope={args.scope} 共 {track_rows} 条"
+        f"（账本总计 {len(history)} 条，其余 {len(history) - track_rows} 条属于别的轨道，不计入 G3/G4）"
+        if args.ledger else "未提供 --ledger：G3/G4 判为不可用"
+    )
+
+    verdict, gates, unavailable = evaluate(stats, history, today, scope=args.scope)
+    print(render(stats, verdict, gates, unavailable, [], scope=args.scope, history_note=history_note))
     annotate(verdict, stats, gates)
 
-    record = build_record(stats, verdict, gates, ts=ts, run=args.run, source=args.source, note=args.note)
+    record = build_record(
+        stats, verdict, gates, ts=ts, run=args.run, source=args.source,
+        note=args.note, scope=args.scope,
+    )
     try:
         warnings = ledger.validate_record(record)
     except ledger.SchemaError as exc:

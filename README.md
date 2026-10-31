@@ -38,21 +38,29 @@ BASE_URL=https://your-site.example python -m pytest suites/thirdparty   # 换目
 `BASE_URL` 默认值在 `config/settings.py` 的 `DEFAULT_BASE_URL`，环境变量优先。
 除这一处外，代码里不允许出现硬编码 URL、超时数值、路径。
 
-### 三条常用命令
+### 常用命令（两条轨道各一份 junit，各判各的）
 
 ```bash
 # 只看「今天能不能打开」
 python -m pytest suites/thirdparty -m ui -k smoke -q
 
-# 门禁吃的那份：只跑浏览器用例，产出独立 junit
+# 火车票轨道（scope=ui）
 python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
+python tools/blocked_gate.py reports/junit-ui.xml --scope ui
 
-# 判定这份 junit（退出码 0=绿/黄，1=红，2=口径不成立）
-python tools/blocked_gate.py reports/junit-ui.xml
+# 酒店轨道（scope=ui_hotels）
+python -m pytest suites/hotels -m hotels --junitxml=reports/junit-hotels.xml
+python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels
 ```
 
-`-m ui` 不是装饰：不带它跑出来的 junit 里混着 27 条数据层单测，
+门禁退出码：`0` 绿/黄，`1` 红，`2` 口径不成立。
+
+`-m ui` / `-m hotels` 不是装饰：不带它跑出来的 junit 里混着 27 条数据层单测，
 门禁会直接判「口径混算」并拒绝出数（见 `docs/BLOCKED-GATE.md` §1）。
+
+`--scope` 也不是装饰：**G3/G4 只在同一 scope 内累计**。两个站点的拦截率不可比，
+混算时酒店那条 25% 会把火车票的 1.0 序列打断，G3 永不触发。`--scope` 与 junit 口径
+不一致会 exit 2，不会「忘了改一处还照常出数」。
 
 ---
 
@@ -160,6 +168,17 @@ verdict: RED   触发: G1, G2
 
 注意 `total=5` 与 `counted=4` 的差：K-01 那条 skip 不进分母，
 所以 `ratio` 是 4/4 而不是 4/5 —— 这是口径，不是笔误（见 `docs/BLOCKED-GATE.md` §2）。
+
+另一条轨道（酒店一期，2026-11-01 00:31，`-m hotels`）：
+
+```
+3 passed, 1 skipped, 1 xfailed
+scope=ui_hotels  total=5  counted=4  blocked=1  pass=3  failed=0  known-limit=1  ratio=25.0%
+verdict: YELLOW   触发: G5
+```
+
+25% 不当失败回退：`blocked` 是事实，G5 只提示；把它当红会让「今天被拦了」变成
+「今天不许提交」，那就又回到掩盖拦截的老路。
 
 时间线（同一台机器、同一 IP、约 30 分钟内）：
 

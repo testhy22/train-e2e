@@ -19,7 +19,15 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 VERDICTS = frozenset({"GREEN", "YELLOW", "RED"})
-SCOPES = frozenset({"ui", "unit"})
+
+# 门禁可判定的口径 = 允许写进账本的口径。两条轨道打的是两个站点，拦截率不可比，
+# 所以各自一条序列（G3/G4 只在同一条序列内累计）。
+#   ui         火车票（trains.ctrip.com）
+#   ui_hotels  酒店（www.ctrip.com 首页酒店模块）
+# `unit` 是 junit 侧的标记（数据层单测），门禁拒收，账本也不接受 ——
+# 账本里出现 scope=unit 说明写入端绕过了门禁。
+GATE_SCOPES = ("ui", "ui_hotels")
+SCOPES = frozenset(GATE_SCOPES)
 SOURCES = frozenset({"ci", "local"})
 GATE_CODES = frozenset({"G0", "G1", "G2", "G3", "G4", "G5", "G6"})
 
@@ -105,7 +113,10 @@ def validate_record(record: Any, *, line_no: int | None = None) -> list[str]:
         raise SchemaError(f"{where} {exc}") from exc
 
     if record["scope"] not in SCOPES:
-        raise SchemaError(f"{where} scope 只能是 {sorted(SCOPES)}，实际 {record['scope']!r}")
+        raise SchemaError(
+            f"{where} scope 只能是 {sorted(SCOPES)}，实际 {record['scope']!r}"
+            "（新轨道必须先在 ledger.GATE_SCOPES 登记，否则 G3/G4 会跨轨道串味）"
+        )
     if record["source"] not in SOURCES:
         raise SchemaError(f"{where} source 只能是 {sorted(SOURCES)}，实际 {record['source']!r}")
     if record["verdict"] not in VERDICTS:

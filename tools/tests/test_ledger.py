@@ -88,9 +88,16 @@ def test_gate含未知编号必须报错():
         ledger.validate_record(good(gate="G9"))
 
 
-def test_scope只认ui和unit():
-    with pytest.raises(ledger.SchemaError, match="scope"):
-        ledger.validate_record(good(scope="all"))
+def test_scope只认已登记的轨道():
+    """账本只接受门禁能产出的轨道（ledger.GATE_SCOPES）。
+
+    `unit` 是 junit 侧的标记，门禁从不写它 —— 账本里出现 scope=unit 说明写入端
+    绕过了门禁，应当报错而不是被当成一条新轨道悄悄收下。
+    """
+    assert ledger.SCOPES == frozenset({"ui", "ui_hotels"})
+    for bad in ("all", "unit", "ui-hotels"):
+        with pytest.raises(ledger.SchemaError, match="scope"):
+            ledger.validate_record(good(scope=bad))
 
 
 def test_读账本遇到坏行立刻报错并给行号(tmp_path: Path):
@@ -106,7 +113,7 @@ def test_幂等键只看ts和scope():
     a = good()
     b = good(verdict="GREEN", ratio=0.0, blocked=0, effective_pass=4)
     assert ledger.record_key(a) == ledger.record_key(b)
-    assert ledger.record_key(a) != ledger.record_key(good(scope="unit"))
+    assert ledger.record_key(a) != ledger.record_key(good(scope="ui_hotels"))
     assert ledger.record_key(a) != ledger.record_key(good(ts="2026-11-01T00:00:00+08:00"))
 
 

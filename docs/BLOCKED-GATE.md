@@ -17,13 +17,14 @@
 
 | 项 | 要求 |
 |---|---|
-| 输入文件 | **只吃浏览器用例那份 junit**：`pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml` |
-| 口径属性 | 每条 testcase 必须带 `<property name="scope" value="ui"/>`，由 `conftest.py` 的 `pytest_collection_modifyitems` 统一盖 |
+| 输入文件 | **一条轨道一份 junit**：火车票 `pytest suites/thirdparty -m ui`、酒店 `pytest suites/hotels -m hotels`，各自 `--junitxml` |
+| 轨道声明 | 判定时必须用 `--scope ui`（火车票）或 `--scope ui_hotels`（酒店）声明本次判哪条；junit 里每条的 `scope` 属性必须**全部等于**它，混入别的轨道即 exit 2 |
+| 口径属性 | 每条 testcase 必须带 `<property name="scope" value="ui"/>` 或 `"ui_hotels"`，由 `conftest.py` 的 `pytest_collection_modifyitems` 按标记统一盖（`hotels` 标记优先于 `ui`） |
 | blocked 标记 | `pytest.xfail(reason="blocked: <signal>")`，前缀固定 `blocked:` |
 | 已知限制 | `pytest.skip(reason="known-limit: K-xx <原因>")`，前缀固定 `known-limit:` |
 | 真实失败 | 普通 `assert` 失败 / 异常，**禁止**转成 xfail 或 skip |
 
-三条不可妥协的理由：
+四条不可妥协的理由：
 
 1. **口径不能混算。** 2026-10-31 实测：31 条里 27 条是数据层单测。一起进分母时
    `ratio = 4/(4+27+0) = 12.9%`，G1（要 `effective_pass == 0`，实际是 27）与
@@ -34,7 +35,11 @@
    换个 rootdir 就变；`user_properties` 跟着用例走。实测 pytest 9.2.0 会把
    `user_properties` 写成 `<properties><property name="scope" value="ui"/></properties>`，
    pass / xfail / fail 三种结果都写。
-3. **未知前缀不得静默归类。** junit 里 xfail 与 skip 都落在 `<skipped>` 元素，
+3. **拦截率不可跨站点比较。** 火车票与酒店是两个站点、两套 WAF。共用一个 `scope`
+   时，酒店那条 25% 会把火车票的 1.0 序列打断，G3（连续 3 次 ≥0.3）与 G4（连续 7 天 ≥0.1）
+   永不触发——阈值不是不灵敏，是被稀释。因此 **G3/G4 只在同一 `scope` 内累计**
+   （裁决 2026-11-01），账本的 `scope` 字段就是这个分组键。
+4. **未知前缀不得静默归类。** junit 里 xfail 与 skip 都落在 `<skipped>` 元素，
    只能靠 `message` 前缀区分「被对方拦」和「我们自己承认的限制」。
    前缀不认识的，一律判**契约不成立**（exit 2），不允许默认算作 skip——
    「看不懂就当跳过」会让 `counted` 悄悄变小，`ratio` 悄悄变大。
@@ -44,7 +49,7 @@
 ## 2. 指标
 
 ```
-total           = scope=ui 的用例数（含 known-limit 跳过）
+total           = scope=<本次 --scope> 的用例数（含 known-limit 跳过）
 known_limit     = message 以 "known-limit:" 开头的跳过
 counted         = blocked + effective_pass + failed        ← 分母，known_limit 不进
 blocked         = message 以 "blocked:" 开头的结果
@@ -70,14 +75,22 @@ ratio           = blocked / counted                        （counted 为 0 时�
 | **G0 真失败** | `failed ≥ 1` | 🔴 红 | 功能失败优先级高于一切，不看 ratio |
 | **G1 空转** | `effective_pass == 0` 且 `total ≥ 2` | 🔴 红 | 一条都没验证成功，绿色无意义 |
 | **G2 高比例** | `counted ≥ 4` 且 `ratio ≥ 0.5` | 🔴 红 | 半数以上被拦，样本足够 |
-| **G3 趋势** | 最近连续 3 次（含本次）`ratio ≥ 0.3` | 🔴 红 | 单次 30% 不起眼，连续 3 次是 IP 在被逐步收紧 |
-| **G4 长期** | 最近 7 个自然日都有记录，且每天都 `blocked ≥ 1` 且 `ratio ≥ 0.1` | 🟡 黄 + 开 Issue | 长期标记，不是抖动 |
+| **G3 趋势** | **同一 `scope`** 的最近连续 3 次（含本次）`ratio ≥ 0.3` | 🔴 红 | 单次 30% 不起眼，连续 3 次是 IP 在被逐步收紧 |
+| **G4 长期** | **同一 `scope`** 的最近 7 个自然日都有记录，且每天都 `blocked ≥ 1` 且 `ratio ≥ 0.1` | 🟡 黄 + 开 Issue | 长期标记，不是抖动 |
 | **G5 提示** | `blocked ≥ 1`，且以上都没命中 | 🟡 黄（`::warning::`） | 提醒但不判死 |
 | **G6 正常** | `blocked == 0` 且 `effective_pass ≥ 1`，且以上都没命中 | 🟢 绿 | — |
 
 **G1 的写法改过一次**：原为 `blocked ≥ 2 且 effective_pass == 0`。2026-10-31 的记录两种写法
 同判红，但原写法漏掉「全部被 `known-limit` 跳过」这种同样什么都没测的空转，
 现改为 `effective_pass == 0 且 total ≥ 2`。
+
+**G3/G4 按轨道分组**（裁决 2026-11-01）：只用 `scope` 等于本次 `--scope` 的历史行，
+其余行（火车票 / 酒店 / 将来新增的轨道）一概不进序列，输出里会写明
+「轨道历史：scope=X 共 N 条（账本总计 M 条，其余 M-N 条属于别的轨道，不计入 G3/G4）」。
+两条轨道共用同一个 jsonl 而不是拆文件：拆文件会让读回、schema 校验、CI 聚合各多一层，
+而分组的唯一需求只是「不串味」，一个字段就够。反例已固化为测试
+`tools/tests/test_blocked_gate.py::test_hotels的25不打断trains的1_0序列`
+与 `::test_hotels轨道G4独立计算`。
 
 **小样本豁免**：`counted < 4` 时关闭 G2/G3/G4（3 条里拦 2 条 ratio 就是 66%，没有统计意义），
 G0/G1/G5/G6 照常——它们不是比例判定，不受样本量影响。
@@ -109,6 +122,7 @@ G0/G1/G5/G6 照常——它们不是比例判定，不受样本量影响。
 |---|---|---|
 | **只 append** | 永不改写历史行、不做行轮转。文件胀到影响读取时，新建分卷文件，旧文件原样冻结 | 改一行就等于改历史，G3/G4 从此不可复核 |
 | **schema_version** | 每条带版本号；缺字段的历史行按 v0 只做旧字段校验，**不改写** | 结构演进要能与历史共存 |
+| **`scope` 取值** | 只允许 `ui`（火车票）/ `ui_hotels`（酒店），清单登记在 `tools/ledger.py` 的 `GATE_SCOPES`；`unit` 是 junit 侧标记，账本拒收 | 新增轨道必须先登记，否则 G3/G4 会跨轨道串味；`unit` 进账本说明写入端绕过了门禁 |
 | **幂等键 `ts\|scope`** | `ts` 取自 junit 的 `testsuite timestamp`，不是墙上时钟 | workflow 重试 / 本地重放同一份 junit 会得到同一个键，第二次写入被识别为重复 |
 | **父提交** | 每次先 fetch 当前 tip，在 worktree 里基于该 tip 提交，再快进 push | 禁止「孤儿 commit + force push」：那样 git 历史每天是互不相关的快照，出问题答不出「这条记录在哪次之后加的」 |
 | **并发** | CI `concurrency.group` 串行化 + 本地文件锁（`.git/blocked-ledger.lock`，600s 视为陈旧） | 两个写入者同时 fetch 会导致后者非快进，重试也救不了 |
@@ -148,7 +162,7 @@ G3/G4 依赖历史，所以 ledger 丢失 = 这两条阈值失效。这也是不
 - name: blocked 门禁
   id: gate
   continue-on-error: true          # 红也要先把记录写进 ledger，再由最后一步把 job 弄红
-  run: python tools/blocked_gate.py reports/junit-ui.xml \
+  run: python tools/blocked_gate.py reports/junit-ui.xml --scope ui \
          --ledger .ledger/blocked-ledger.jsonl --record-out reports/gate-record.json
 
 - name: 追加 ledger 并读回校验
@@ -158,6 +172,9 @@ G3/G4 依赖历史，所以 ledger 丢失 = 这两条阈值失效。这也是不
   if: steps.gate.outcome == 'failure'
   run: exit 1
 ```
+
+酒店轨道另起一份 job，把 `--junitxml`、`-m hotels`、`--scope ui_hotels` 三处同时换掉即可；
+`--scope` 与 junit 口径不一致会 exit 2，不存在「忘了改一处还照常出数」。
 
 `continue-on-error` 只用在用例与门禁两步，理由：红也必须留下记录，
 但 job 最终结果必须是红，否则「红了但 CI 绿」= 另一种形式的假绿。
@@ -173,13 +190,19 @@ G3/G4 依赖历史，所以 ledger 丢失 = 这两条阈值失效。这也是不
 4. 门禁拒收旧格式 junit（无 `scope` 属性）。现场存证见
    `tools/tests/fixtures/junit-mixed-31.xml` 与
    `tools/tests/test_blocked_gate.py::test_旧格式junit没有scope属性必须被拒收`。
-5. 本文件的判定表有 5 个变异被测试杀死（ratio 分母换成 total、未知前缀静默跳过、
-   不检查 scope、G1 退回旧写法、真失败不红），见 `tools/tests/`。
+5. 本文件的判定表有 9 个变异被测试杀死（ratio 分母换成 total、未知前缀静默跳过、
+   不检查 scope、G1 退回旧写法、真失败不红，以及分轨相关的 4 个：历史不按轨道过滤、
+   记录 scope 写死 ui、聚合只比默认轨道、白名单不登记 ui_hotels），见 `tools/tests/`。
 
 ---
 
 ## 9. 变更记录
 
+- **2026-11-01 v3**：账本按轨道分账。`scope` 白名单 `{ui, ui_hotels}`（登记在 `ledger.GATE_SCOPES`），
+  门禁新增 `--scope` 声明本次判哪条轨道，junit 口径不符即 exit 2；**G3/G4 改为只在同一 `scope` 内累计**，
+  输出写明本轨道用了几条历史。理由：酒店那条 25% 打断了火车票的 1.0 序列，G3 永不触发。
+  历史行（第 1–3 行，scope=ui）不改写，酒店从第 4 行起写 `ui_hotels`。
+  新增 4 条单测 + 4 个变异；不加单独 jsonl（读回/schema/CI 聚合会各多一层，而分组只需一个字段）。
 - **2026-10-31 v2**：G1 改写为 `effective_pass == 0 且 total ≥ 2`；新增 G0；
   判定表改为「不短路、gate 列全部命中」；`ratio` 分母显式定为 `counted`；
   ledger 增加 `schema_version` / `counted` / `known_limit` / `provisional` 与父提交、幂等、读回三项约束；
