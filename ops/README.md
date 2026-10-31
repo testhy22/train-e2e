@@ -16,7 +16,7 @@
 | `ts` | ISO 8601 带时区 | 取自 junit 的 `testsuite timestamp`，**不是墙上时钟** |
 | `run` | string | CI run id，或本地标识 |
 | `source` | `ci` / `local` | 来源 |
-| `scope` | `ui` / `unit` | 统计口径；**门禁只认 `ui`，两种不得混算** |
+| `scope` | `ui` / `ui_hotels` | **轨道 = G3/G4 的分组键**。`ui` = 火车票（trains.ctrip.com），`ui_hotels` = 酒店（www.ctrip.com 首页酒店模块）。两种不得混算，也不得跨轨道累计趋势。`unit` 是 junit 侧标记，账本拒收 |
 | `total` | int | 该口径下的用例数，**含 known-limit 跳过** |
 | `counted` | int | **判定分母** = `blocked + effective_pass + failed` |
 | `blocked` | int | `message` 以 `blocked:` 开头的 xfail 数 |
@@ -26,7 +26,7 @@
 | `ratio` | float | **`blocked ÷ counted`** |
 | `verdict` | `GREEN` / `YELLOW` / `RED` | 门禁结论，取命中项里的最高严重级 |
 | `gate` | string | **本次「触发/命中」的判定编号**，逗号分隔，如 `G1,G2`；无命中为空串 |
-| `top_signal` | string | 出现最多的拦截信号，形如 `waf_block(whaleguard)`；无则空串 |
+| `top_signal` | string | 出现最多的拦截信号，形如 `waf_block(whaleguard)`；无则空串。⚠️ `login_wall` 的 detail 是整条回跳 URL（长度 ~130 字符），形如 `login_wall(https://passport…)`，看板请按前缀匹配，不要按全串分组 |
 | `provisional` | bool | `true` = 阈值尚未校准（当前恒为 true，见规范 §6） |
 | `note` | string | 可选，人工补充。**人工判断只写这里，永不写 verdict** |
 
@@ -70,6 +70,14 @@
 3. **推完必须读回。** `gh api ... --jq .content | base64 -d` 取回远端内容，逐行跑 schema 校验；
    读不回或任一行不合法就报错（CI 红）。只相信 push 的退出码，等于相信「我说我推了」。
 
+配套三点（第三点 2026-11-01 追加）：
+
+- **`scope` 只在同一轨道内累计。** G3（连续 3 次 ≥0.3）与 G4（连续 7 天 ≥0.1）只读 `scope`
+  等于本次门禁 `--scope` 的行。理由：酒店那条 25% 曾把火车票的 1.0 序列打断，G3 永不触发
+  ——阈值不是不灵敏，是被稀释。第 1–3 行的 `scope` 是 `ui`（分账前的历史，不改写），
+  酒店从第 4 行起写 `ui_hotels`；因此第 3 行那条 0.25 仍在火车票序列里，属于历史遗留。
+- **`scope` 白名单**登记在 `tools/ledger.py` 的 `GATE_SCOPES`，新增轨道必须先登记；
+  否则校验端会直接拒收，避免「悄悄多一条没人算的轨道」。
 配套两点：
 
 - **幂等键 `ts|scope`**：同一份 junit 重跑（workflow 重试、本地重放）得到同一个键，
