@@ -63,7 +63,7 @@ jobs:
         id: gate
         continue-on-error: true       # 红了也要先落记录，再由最后一步把 job 弄红
         run: |
-          python tools/blocked_gate.py reports/junit-ui.xml \
+          python tools/blocked_gate.py reports/junit-ui.xml --scope ui \
             --ledger .ledger/blocked-ledger.jsonl \
             --record-out reports/gate-record.json
 
