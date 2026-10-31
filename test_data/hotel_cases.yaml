@@ -1,0 +1,37 @@
+# 酒店搜索用例数据（一期：目的地 / 入住 / 退房 / 房间及住客）
+#
+# 字段说明
+#   id                  用例标识，只用字母数字与 - _
+#   city                城市名，必须能命中首页目的地联想面板
+#   checkin_offset_days 相对今天的天数（1…60，工程边界，非业务口径）
+#   nights              住几晚（>=1），退房日 = 入住日 + nights
+#   rooms/adults/children 房间数与住客数；页面默认 1 间 1 位，故只支持不低于默认值
+#
+# 为什么用偏移量：写死日期过几天就是过去时，用例会红得没有信息量（与火车票同一原则）。
+#
+# 儿童数固定 0：加儿童会在弹层里多出年龄选择控件，2026-11-01 的探针没覆盖到，
+# 属于二期范围，不在本期假装支持。
+
+- id: sh
+  city: 上海
+  checkin_offset_days: 7
+  nights: 2
+  rooms: 1
+  adults: 1
+  children: 0
+
+- id: bj
+  city: 北京
+  checkin_offset_days: 10
+  nights: 3
+  rooms: 2
+  adults: 3
+  children: 0
+
+- id: gz
+  city: 广州
+  checkin_offset_days: 14
+  nights: 1
+  rooms: 1
+  adults: 2
+  children: 0

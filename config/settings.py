@@ -21,6 +21,13 @@ DEFAULT_BASE_URL = "https://trains.ctrip.com"
 
 # ---------------------------------------------------------------- 业务规则上限
 
+# 酒店搜索轨道的站点根（D1 裁决 2026-11-01）。
+# 选 www.ctrip.com 而不是 hotels.ctrip.com 的唯一理由：需求里的「酒店级别」字段
+# 只在首页酒店模块存在。实测（reports/probe_www_hotels_01.json）：
+#   hotels.ctrip.com → 只有 目的地/入住/退房/人数/搜索，无「酒店级别」「关键词」
+#   www.ctrip.com    → 五段齐全（目的地/入住/退房/房间及住客/酒店级别/关键词）
+HOTELS_BASE_URL = "https://www.ctrip.com"
+
 # 铁路客票预售期（天，含当日）。
 # 2026-10 核实，来源：12306 官方口径（全国铁路统一预售期 15 天；第三方宣称的
 # 30/90 天预约均为营销说法，实际不可售）。预售期若调整，只改这一处。
@@ -62,12 +69,20 @@ class ConfigError(RuntimeError):
     """配置缺失或不合法。"""
 
 
+def _resolve_url(raw: str, env_name: str) -> str:
+    if not raw.startswith(("http://", "https://", "file://")):
+        raise ConfigError(f"{env_name} 必须以 http:// https:// file:// 开头，收到 {raw!r}")
+    return raw.rstrip("/")
+
+
 def base_url() -> str:
     """返回目标站点根地址。环境变量优先，否则用 DEFAULT_BASE_URL。"""
-    url = (os.getenv("BASE_URL", "").strip() or DEFAULT_BASE_URL).strip()
-    if not url.startswith(("http://", "https://", "file://")):
-        raise ConfigError(f"BASE_URL 必须以 http:// https:// file:// 开头，收到 {url!r}")
-    return url.rstrip("/")
+    return _resolve_url((os.getenv("BASE_URL", "").strip() or DEFAULT_BASE_URL).strip(), "BASE_URL")
+
+
+def hotel_base_url() -> str:
+    """酒店轨道的站点根。环境变量 HOTEL_BASE_URL 优先，否则用 HOTELS_BASE_URL。"""
+    return _resolve_url((os.getenv("HOTEL_BASE_URL", "").strip() or HOTELS_BASE_URL).strip(), "HOTEL_BASE_URL")
 
 
 def ensure_dirs() -> None:

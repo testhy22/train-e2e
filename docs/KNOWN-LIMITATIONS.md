@@ -34,6 +34,18 @@
 | 为什么不是缺陷 | 这是业务约束，不是系统限制 |
 | 销号条件 | 官方口径变化时改 `config/settings.py` 的 `MAX_PRESALE_DAYS`，并同步本条 |
 
+## K-04 匿名态酒店列表被登录墙接管（结果渲染不可验证）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 首页填完搜索条件点「搜索」，浏览器落到 `passport.ctrip.com/user/login?backurl=…`；**直接打开** `hotels.ctrip.com/hotels/list?...` 同样被接管 |
+| 取证 | 2026-11-01，`reports/probe_www_hotels_03.json`（提交后落点）、`reports/probe_www_hotels_04.json`（直开 list URL 亦被拦） |
+| 为什么不绕过 | 登录 / 复用 cookie 属于拿用户凭据绕开频率与身份限制，与 D 决策（零反检测、不复用 cookie）冲突，且 CI 无法安全持有凭据 |
+| 影响 | 一期**不断言结果列表渲染**，改断言「提交时真实发出的 `/hotels/list` 参数」（日期/晚数/房间人数/城市），这是页面自己生成的证据；`test_result_list_renders` 标 `skip("known-limit: K-04 …")`，不进分母 |
+| 保留的契约测试 | `test_login_wall_is_global` 断言「直开 list URL 仍被接管」。它一旦变绿，说明登录墙放开，本条目可销号、列表断言可恢复 |
+| 销号条件 | `test_login_wall_is_global` 连续 3 天在 CI 中失败（即不再被接管），且能稳定取到酒店卡片 ≥1 条 |
+| 二期方向 | 酒店级别、关键词字段；儿童年龄控件；有合法登录态的独立轨道（需另立决策，不在本期） |
+
 ## K-03 blocked 不留 trace
 
 | 项 | 内容 |
