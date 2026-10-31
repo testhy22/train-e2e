@@ -145,8 +145,12 @@ M1 只做「轨道 B 物理搬家 + 轨道 A 从零新建」，共用一个 `con
 
 ### 2.2 指标定义（每个 run 计算一次）
 
+**口径先定，再谈阈值。** 门禁只吃「浏览器用例」那一份 junit（`pytest -m ui --junitxml=...`），
+不吃饭碗里混着的数据层单测。
+
 ```
-total            = junit 中的用例总数
+范围              = 标记了 @pytest.mark.ui 的用例（当前 4 条：1 smoke + 3 查询）
+total            = 该范围内的用例总数
 blocked          = reason 以 "blocked:" 开头的 xfail 数
 skipped          = reason 以 "known-limit:" 开头的 skip 数
 effective_pass   = passed 数
@@ -154,15 +158,31 @@ failed           = failure + error 数
 ratio            = blocked / (blocked + effective_pass + failed)     # 分母排除 skipped
 ```
 
+⚠️ **修正（2026-10-31 23:44，实测推翻了上一版）**：上一版把「31 条全部用例」当分母，这是错的。
+按 31 条算，`ratio = 4/(4+27+0) = 12.9%`；而 G1 要求 `effective_pass == 0`（实际是 27），
+G2 要求 `ratio ≥ 0.5`（实际 0.129）—— 两条**都不会触发**，门禁等于装饰。
+
+实测数据（`reports/junit-seed.xml`，2026-10-31 23:44）：
+
+| 口径 | total | blocked | effective_pass | ratio | G1 | G2 |
+|---|---|---|---|---|---|---|
+| 全部 31 条（错） | 31 | 4 | 27 | 12.9% | ✗ | ✗ |
+| 仅 UI 4 条（对） | 4 | 4 | 0 | 100% | **✓ 红** | **✓ 红** |
+
+结论：**「今天会被判红」这句话只在 `scope=ui` 下成立**。原句在 31 条口径下是错的，已改。
+配套硬要求：CI 必须单独跑一次 `-m ui` 并产出独立 junit，门禁只吃那份；
+`scope` 字段写进 ledger，禁止混算（见 `ops/metrics` 分支的 README）。
+
 前置改动（M1-6，一处字符串）：现有 conftest 的 `pytest.xfail(reason="blocked by anti-bot: ...")` 统一改为
 `reason="blocked: <signal>"`；已知限制改 `pytest.skip(reason="known-limit: K-01 ...")`。
 **没有这个前缀，门禁无法统计**，这是整套门禁的地基。
+junit 侧已实测可解析：xfail 落在 `<skipped type="pytest.xfail" message="blocked by anti-bot: waf_block（whaleguard）">`。
 
 ### 2.3 判定表（优先级从上到下，命中即停）
 
 | 编号 | 条件 | 判定 | 理由 |
 |---|---|---|---|
-| **G1 全灭** | `blocked ≥ 2` 且 `effective_pass == 0` | 🔴 **红** | 一条都没验证成功，绿色无意义。**今天的状态就是 G1** |
+| **G1 全灭** | `blocked ≥ 2` 且 `effective_pass == 0` | 🔴 **红** | 一条都没验证成功，绿色无意义。UI 口径下**今天就是 G1**（4/4 被拦） |
 | **G2 高比例** | `total ≥ 4` 且 `ratio ≥ 0.5` | 🔴 **红** | 半数以上被拦，样本足够，不是偶发 |
 | **G3 趋势性** | 最近连续 3 次 `ratio ≥ 0.3` | 🔴 **红** | 单次 30% 看不出问题，连续 3 次就是出口 IP 在被逐步收紧 |
 | **G4 长期中毒** | 最近连续 7 天至少 1 次 `blocked ≥ 1` 且 `ratio ≥ 0.1` | 🟡 **黄** + 开/更新 Issue | 不是一次性抖动，是长期标记 |
