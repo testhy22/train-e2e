@@ -1,0 +1,1 @@
+{"ts": "2026-10-31T23:44:11+08:00", "run": "local-seed-2026-10-31", "source": "local", "scope": "ui", "total": 4, "blocked": 4, "effective_pass": 0, "failed": 0, "skipped": 0, "ratio": 1.0, "verdict": "RED", "gate": "G1,G2", "top_signal": "waf_block(whaleguard)", "note": "首次运行：4 条 UI 用例全部被 WAF 拦截；同日 27 条数据层单测通过（scope=unit，不计入本行）"}
