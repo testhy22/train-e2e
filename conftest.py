@@ -5,12 +5,15 @@
 2. 任何 call 阶段的失败，都自动截「视口 + 整页」两张图，并把 URL / title 写进报告。
 3. blocked 不是 fail。BlockedByAntiBot 只在 blocked_guard() 里转成 xfail；
    普通断言失败原样是 fail，不允许被 xfail 吃掉。
+
+两种「不是代码缺陷的未通过」必须用固定前缀区分，否则门禁统计不出来（规范见 docs/BLOCKED-GATE.md）：
+  pytest.xfail("blocked: <signal>")         → 被对方拦下，计入 blocked
+  pytest.skip("known-limit: K-xx <原因>")   → 我们自己的已知限制，排除出分母
 """
 
 from __future__ import annotations
 
 import contextlib
-from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page
@@ -19,12 +22,30 @@ from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
 from pages.train_search_page import WidgetUnavailable
 
-
 # ---------------------------------------------------------------- 会话级
 
 def pytest_configure(config: pytest.Config) -> None:
     settings.ensure_dirs()
     config.addinivalue_line("markers", "smoke: 只打开页面、检测风控、记录标题与 URL，不做任何交互")
+
+
+# ---------------------------------------------------------------- 统计口径
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """给每条用例盖上 scope 属性，随 junit 一起落盘，供门禁读取。
+
+    scope=ui   → 驱动浏览器的用例，计入 blocked 门禁
+    scope=unit → 数据层单测，门禁必须拒收（tools/blocked_gate.py 的 SCOPE_VIOLATION）
+
+    为什么不用目录名 / classname 判断：junit 的 classname 是 rootdir 相对路径，
+    在别的 rootdir 下跑一次就变；`user_properties` 是跟着用例走的，与调用方式无关。
+    实测（2026-10-31）：pytest 9.2.0 会把 user_properties 写成
+    `<properties><property name="scope" value="ui"/></properties>`，pass / xfail / fail 三种结果都写。
+    """
+    for item in items:
+        item.user_properties.append(
+            ("scope", "ui" if item.get_closest_marker("ui") else "unit")
+        )
 
 
 # ---------------------------------------------------------------- 浏览器上下文
@@ -85,17 +106,20 @@ def blocked_guard(request: pytest.FixtureRequest, base_page: BasePage):
                 f"截图：{', '.join(str(p) for p in paths) or '(截图失败)'}"
             )
             request.node.add_report_section("call", "blocked 证据", detail)
-            pytest.xfail(f"blocked by anti-bot: {exc.signal.kind}（{exc.signal.detail}）")
+            # 前缀固定为 "blocked:"，门禁靠它把 xfail 归类为「被对方拦」。
+            pytest.xfail(f"blocked: {exc.signal.kind}（{exc.signal.detail}）")
 
     return _guard
 
 
 @pytest.fixture
 def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
-    """自定义控件（日历）没按预期响应时转 xfail。
+    """自定义控件（日历）没按预期响应时转 **skip**，reason 前缀固定 known-limit:。
 
-    与 blocked 分开：blocked 是对方拒绝访问，这里是页面控件行为不符合预期。
-    两种情况都不算通过，但报告里必须能分辨是哪一种。
+    与 blocked 的区别（M1-2 改的口径）：blocked 是对方拒绝访问，属于外部事实，
+    要进 blocked 统计；本例是「我们自己的控件交互受限」，属于已知限制，
+    永远不该算进 blocked，也不该进分母——否则一条 K-01 会让 ratio 永久虚高。
+
     只捕获 WidgetUnavailable；断言失败仍然是 fail。
     """
 
@@ -110,7 +134,7 @@ def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
                 "控件不可用",
                 f"原因：{exc}\nurl：{base_page.page.url}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
             )
-            pytest.xfail(f"控件不可用: {exc}")
+            pytest.skip(f"known-limit: K-01 日历控件唤不起（{exc}）")
 
     return _guard
 

@@ -1,17 +1,25 @@
 name: ctrip-train-e2e
 
-# 只跑定时与手动：真页面测试挂在 push 上会被限流，也会拖慢每次迭代。
+# 目前**手动触发**为主。定时任务暂缓：M1-2（-m ui 与前缀标准化）刚合入，
+# 要先手动跑一轮确认 verdict / gate / ratio 的语义与 ledger 一致，再打开定时。
+# 打开时恢复下面三行并去掉注释即可。
 on:
-  schedule:
-    - cron: "0 22 * * *"      # UTC 22:00 = 北京时间 06:00
   workflow_dispatch:
+  # schedule:
+  #   - cron: "30 0 * * *"      # UTC 00:30 = 北京时间 08:30，避开整点高峰
 
+# 写 ops/metrics 分支需要 contents: write
+permissions:
+  contents: write
+
+# 同一时刻只允许一个写账本的 run。两个并发 run 各自 fetch 同一个 tip 再 push，
+# 后一个必然非快进——重试救不了，只能串行。
 concurrency:
-  group: ctrip-train-e2e
+  group: blocked-ledger
   cancel-in-progress: false
 
 jobs:
-  e2e:
+  ui:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -33,15 +41,31 @@ jobs:
       - name: 安装浏览器
         run: python -m playwright install --with-deps chromium
 
-      - name: 运行 E2E
-        id: run
-        continue-on-error: true
+      - name: 取回 ledger（G3/G4 要历史）
         run: |
-          python -m pytest -q --junitxml=reports/junit.xml
+          mkdir -p .ledger
+          git fetch --depth=1 origin ops/metrics
+          git show FETCH_HEAD:ops/blocked-ledger.jsonl > .ledger/blocked-ledger.jsonl
+          echo "已取回 $(wc -l < .ledger/blocked-ledger.jsonl) 行历史"
 
-      - name: 汇总 blocked（黄色告警，不标红）
-        if: always()
-        run: python tools/ci_blocked_report.py reports/junit.xml
+      - name: UI 用例（独立 junit，供门禁消费）
+        id: ui
+        continue-on-error: true       # blocked 是 xfail，pytest 本身退出 0；真失败由 G0 兜
+        run: |
+          mkdir -p reports
+          python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
+
+      - name: blocked 门禁
+        id: gate
+        continue-on-error: true       # 红了也要先落记录，再由最后一步把 job 弄红
+        run: |
+          python tools/blocked_gate.py reports/junit-ui.xml \
+            --ledger .ledger/blocked-ledger.jsonl \
+            --record-out reports/gate-record.json
+
+      - name: 追加 ledger 并读回校验
+        if: always() && steps.gate.outcome != 'skipped'
+        run: python tools/ledger_append.py reports/gate-record.json
 
       - name: 上传证据
         if: always()
@@ -50,11 +74,12 @@ jobs:
           name: e2e-evidence-${{ github.run_id }}
           path: |
             reports/
+            .ledger/
           retention-days: 14
           if-no-files-found: warn
 
-      - name: 真正的失败才让 Job 变红
-        if: steps.run.outcome == 'failure'
+      - name: 门禁红 / 契约不成立 / 真失败 ⇒ job 红
+        if: steps.gate.outcome == 'failure' || steps.ui.outcome == 'failure'
         run: |
-          echo "::error::pytest 以非 0 退出（blocked 不会导致非 0，只有真实失败才会）"
+          echo "::error::门禁或用例失败，详见上一步输出与 reports/gate-record.json"
           exit 1

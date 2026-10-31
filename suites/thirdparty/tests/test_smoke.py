@@ -10,7 +10,7 @@ import pytest
 
 from pages.base_page import BasePage
 
-pytestmark = pytest.mark.smoke
+pytestmark = [pytest.mark.ui, pytest.mark.smoke]
 
 
 def test_homepage_reachable(base_page: BasePage, blocked_guard, request: pytest.FixtureRequest):

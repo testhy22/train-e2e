@@ -124,7 +124,7 @@ M1 只做「轨道 B 物理搬家 + 轨道 A 从零新建」，共用一个 `con
 | 情形 | 当前行为 | M1 改为 | 统计口径 |
 |---|---|---|---|
 | 风控拦截 | `xfail("blocked by anti-bot: …")` | `xfail("blocked: <signal>")` + png + `page.content()` + `url.txt` | 计入 `blocked` |
-| 控件唤不起（日历 K-01） | 也走 xfail ⇒ **无限期 xfail** | **`skip("known-limit: K-01 …")`**，写进 `docs/KNOWN-LIMITATIONS.md` | 计入 `skipped`，**不进分母** |
+| 控件唤不起（日历 K-01） | 也走 xfail ⇒ **无限期 xfail** | ✅ 已改为 `skip("known-limit: K-01 …")`，条目在 `docs/KNOWN-LIMITATIONS.md` | 计入 `skipped`，**不进分母** |
 | 真实断言失败 | fail | fail（不变） | 计入 `failed` |
 
 配套改动（M1-2 内完成）：
@@ -143,63 +143,19 @@ M1 只做「轨道 B 物理搬家 + 轨道 A 从零新建」，共用一个 `con
 `tools/ci_blocked_report.py` 只会输出 `::warning::`，**退出码恒为 0**。这意味着：
 拦截率从 0% 涨到 100%，CI 全程绿色。这是「长期全绿但什么都没验证」的标准形态。
 
-### 2.2 指标定义（每个 run 计算一次）
+### 2.2–2.4 指标 / 判定表 / 退出码 → 见 `docs/BLOCKED-GATE.md`
 
-**口径先定，再谈阈值。** 门禁只吃「浏览器用例」那一份 junit（`pytest -m ui --junitxml=...`），
-不吃饭碗里混着的数据层单测。
+**指标定义、判定表（G0–G6）、退出码不在本文件维护。** 唯一规范来源是
+[`BLOCKED-GATE.md`](BLOCKED-GATE.md)，此处只保留三条决策背景：
 
-```
-范围              = 标记了 @pytest.mark.ui 的用例（当前 4 条：1 smoke + 3 查询）
-total            = 该范围内的用例总数
-blocked          = reason 以 "blocked:" 开头的 xfail 数
-skipped          = reason 以 "known-limit:" 开头的 skip 数
-effective_pass   = passed 数
-failed           = failure + error 数
-ratio            = blocked / (blocked + effective_pass + failed)     # 分母排除 skipped
-```
-
-⚠️ **修正（2026-10-31 23:44，实测推翻了上一版）**：上一版把「31 条全部用例」当分母，这是错的。
-按 31 条算，`ratio = 4/(4+27+0) = 12.9%`；而 G1 要求 `effective_pass == 0`（实际是 27），
-G2 要求 `ratio ≥ 0.5`（实际 0.129）—— 两条**都不会触发**，门禁等于装饰。
-
-实测数据（`reports/junit-seed.xml`，2026-10-31 23:44）：
-
-| 口径 | total | blocked | effective_pass | ratio | G1 | G2 |
-|---|---|---|---|---|---|---|
-| 全部 31 条（错） | 31 | 4 | 27 | 12.9% | ✗ | ✗ |
-| 仅 UI 4 条（对） | 4 | 4 | 0 | 100% | **✓ 红** | **✓ 红** |
-
-结论：**「今天会被判红」这句话只在 `scope=ui` 下成立**。原句在 31 条口径下是错的，已改。
-配套硬要求：CI 必须单独跑一次 `-m ui` 并产出独立 junit，门禁只吃那份；
-`scope` 字段写进 ledger，禁止混算（见 `ops/metrics` 分支的 README）。
-
-前置改动（M1-6，一处字符串）：现有 conftest 的 `pytest.xfail(reason="blocked by anti-bot: ...")` 统一改为
-`reason="blocked: <signal>"`；已知限制改 `pytest.skip(reason="known-limit: K-01 ...")`。
-**没有这个前缀，门禁无法统计**，这是整套门禁的地基。
-junit 侧已实测可解析：xfail 落在 `<skipped type="pytest.xfail" message="blocked by anti-bot: waf_block（whaleguard）">`。
-
-### 2.3 判定表（优先级从上到下，命中即停）
-
-| 编号 | 条件 | 判定 | 理由 |
-|---|---|---|---|
-| **G1 全灭** | `blocked ≥ 2` 且 `effective_pass == 0` | 🔴 **红** | 一条都没验证成功，绿色无意义。UI 口径下**今天就是 G1**（4/4 被拦） |
-| **G2 高比例** | `total ≥ 4` 且 `ratio ≥ 0.5` | 🔴 **红** | 半数以上被拦，样本足够，不是偶发 |
-| **G3 趋势性** | 最近连续 3 次 `ratio ≥ 0.3` | 🔴 **红** | 单次 30% 看不出问题，连续 3 次就是出口 IP 在被逐步收紧 |
-| **G4 长期中毒** | 最近连续 7 天至少 1 次 `blocked ≥ 1` 且 `ratio ≥ 0.1` | 🟡 **黄** + 开/更新 Issue | 不是一次性抖动，是长期标记 |
-| **G5 提示** | `1 ≤ blocked` 且未命中以上 | 🟡 **黄**（`::warning::`） | 提醒但不判死 |
-| **G6 正常** | `blocked == 0` 且 `effective_pass ≥ 1` | 🟢 **绿** | — |
-
-小样本豁免：`total < 4` 时**只启用 G1**，不启用 G2（3 条里拦 2 条 ratio 就是 66%，比例没有统计意义，但"全灭"依然成立）。
-
-### 2.4 退出码与 CI 映射
-
-| 判定 | 脚本退出码 | Job 结果 | 附加动作 |
-|---|---|---|---|
-| 绿 | 0 | success | 追加 ledger |
-| 黄 | 0 | success | `::warning::` + 追加 ledger |
-| 红 | 1 | failure | `::error::` + 追加 ledger + 更新 Issue |
-
-**黄的判定必须保持 job 绿**（你的原话：blocked 标黄不标红）。红只在 G1/G2/G3 触发——这三种情况下"绿"本身就是错的，标黄等于继续自欺。
+1. **为什么需要独立门禁**：旧的 `tools/ci_blocked_report.py` 只输出 `::warning::`、
+   退出码恒为 0 —— 拦截率从 0% 涨到 100%，CI 全程绿色。该脚本已删除，
+   由 `tools/blocked_gate.py` 取代。
+2. **口径只吃 `-m ui`**：2026-10-31 那次「31 条 vs 4 条」的统计错误，已固化为可执行测试
+   `tools/tests/test_blocked_gate.py::test_全量31条junit必须被拒收`（混入全量 junit 必须 exit 2）。
+   本文件不再复述那张对照表，避免两处分叉。
+3. **阈值全部 provisional**：0.3 / 0.5 / 3 次 / 7 天是拍的，ledger 攒够 14 天再校准，
+   校准依据写回规范 §6；校准前门禁输出自带 `[provisional]` 标记。
 
 ### 2.5 ledger 持久化（关键：跨 run 才能判 G3/G4）
 
@@ -250,12 +206,18 @@ junit 侧已实测可解析：xfail 落在 `<skipped type="pytest.xfail" message
 
 | 步骤 | 动作 | 对应原则 | 验证方式（命令 + 期望） |
 |---|---|---|---|
-| **M1-1** 依赖 | 装 6 个：`pytest-xdist` `pytest-randomly` `ruff` `mypy` `faker` `pytest-timeout`；拆 `requirements.txt` / `requirements-dev.txt` | 环境可复现 | `python -m pytest -q --collect-only` → **31 collected**（与基线一致） |
-| **M1-2** 轨道拆分 | `git mv tests suites/thirdparty/tests`；`pytest.ini` 加 `testpaths`；建 `suites/regression/` 空骨架 + 各 suite 的 `pytest.ini` | 分层/职责分离 | `pytest suites/thirdparty -q` → 27 passed / 4 xfailed（与搬家前**逐条一致**） |
+| **M1-1** 依赖 ✅ | 6 个已装并锁版本：`xdist 3.8.0` `randomly 5.0.0` `ruff 0.17.3` `mypy 2.4.1` `Faker 40.44.0` `timeout 2.4.0`。拆分时 `pytest-timeout` 放进 **runtime** 依赖——`pytest.ini` 里有 `timeout=180`，缺插件时该项被静默忽略只发 warning，等于「以为挂了超时其实没挂」 | 环境可复现 | `pytest suites/thirdparty --collect-only` → **32 collected**（原 31 + 新增 K-01 用例） |
+| **M1-2** 轨道拆分 ✅ | `git mv tests suites/thirdparty/tests`；`suites/regression/` 空骨架；三条浏览器用例加 `pytest.mark.ui`；`scope` 属性由 conftest 的 `pytest_collection_modifyitems` 统一盖；reason 前缀标准化（`blocked:` / `known-limit:`）；`tools/blocked_gate.py` + `tools/ledger.py` + `tools/ledger_append.py` 落地 | 分层 / 口径干净 | `pytest suites/thirdparty -m ui` → **4 xfailed + 1 skipped（27 deselected）**，与搬家前逐条一致（多出的 1 条是 K-01） |
 | **M1-3** 靶站容器化 | `docker/target-app`（FastAPI + SQLite）：`/healthz`、`POST /api/queries`（预置）、`DELETE /api/queries/{id}`（清理）、`/search` 页含城市联想下拉 + 日期参数 + 结果列表；`compose.yaml` 双 profile | 环境隔离、数据播种 | `docker compose --profile ci up -d --wait` → `curl -sf localhost:8801/healthz` 200；**重复执行 seed 两次，行数不变**（幂等）；`down -v` 后 `docker compose ps` 为空 |
 | **M1-4** 回归试点一条流程 | `pages/search_page.py` + `components/city_picker.py` + `data_factories/query_factory.py`（`uuid4`+`workerId`）+ `fixtures/env.py` 自建自清 | POM、数据工厂、断言在用例层 | `pytest suites/regression -q` → 1 passed；**跑完 DB 中该工厂前缀的行数 = 0**（自清验证） |
 | **M1-5** 并行 + 乱序 | 加第 2 条用例（隔离探针：两 worker 同时写不同 id） | 无共享可变数据 | `pytest suites/regression -n 2 -p randomly` 连跑 3 次 → 全绿；每次结束 DB 行数回到基线 |
 | **M1-6** 门禁与质量 | `item._base_page` → 显式 fixture；`tools/blocked_gate.py` + ledger；三个 workflow；ruff/mypy 只对 diff 文件；blocked 时补 `page.content()` + png + url.txt；xfail/skip reason 前缀标准化 | 可运维性、失败可诊断 | `python tools/blocked_gate.py reports/junit.xml` 在造出的 4 种假报告上分别得 0/0/1/1（绿/黄/红）；`ruff check $(git diff --name-only)` 通过；`mypy` 通过 |
+
+> **一处偏离原计划**：原本要给每个 suite 建独立 `pytest.ini`。实测否决了它——
+> 子目录存在 `pytest.ini` 时 pytest 会把 rootdir 定到该子目录，**项目根的 `conftest.py` 不再被加载**，
+> 结果是 `blocked_guard` / `base_page` 这些 fixture 全部消失（实测报错
+> `fixture 'f' not found`，删掉子目录 ini 后立刻通过）。
+> 因此全工程只保留根 `pytest.ini`，suite 隔离靠 `testpaths` + 调用路径实现。
 
 ### M1 的验收标准（你自己列的 13 条怎么落）
 

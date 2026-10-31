@@ -1,0 +1,13 @@
+# 开发与质量工具，不是跑用例的必要条件。CI 里只在质量 job / flake job 安装。
+-r requirements.txt
+
+# 并行与乱序（M1-5 用；本地默认不开，避免每条用例都起多个浏览器）
+pytest-xdist==3.8.0
+pytest-randomly==5.0.0
+
+# 静态检查（M1-6 用）
+ruff==0.17.3
+mypy==2.4.1
+
+# 合成数据工厂（M1-4 用）
+Faker==40.44.0

@@ -18,6 +18,9 @@ from utils.data_loader import load_cases
 
 CASES = load_cases(settings.PROJECT_ROOT / "test_data" / "search_cases.yaml")
 
+# ui：驱动浏览器，纳入 blocked 门禁的统计范围。数据层单测不得带这个标记。
+pytestmark = pytest.mark.ui
+
 # 内容层门槛：能抽出车次号的条目占比。真实结果里存在「成功率：较高」这类附加行，
 # 抽不到车次号的条目可能是正常形态，所以用比例而不是要求 100%。
 TRAIN_NO_COVERAGE = 0.9

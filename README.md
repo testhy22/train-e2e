@@ -30,20 +30,29 @@
 python -m pip install -r requirements.txt
 python -m playwright install chromium        # 需与 playwright 版本匹配，见「常见问题」
 
-python -m pytest                             # 无头，默认指向 https://trains.ctrip.com
-HEADED=1 python -m pytest tests/test_smoke.py    # 有头，本地调试
-BASE_URL=https://your-site.example python -m pytest   # 换目标站
+python -m pytest                             # 全量（含 27 条数据层单测）
+HEADED=1 python -m pytest suites/thirdparty/tests/test_smoke.py    # 有头，本地调试
+BASE_URL=https://your-site.example python -m pytest suites/thirdparty   # 换目标站
 ```
 
 `BASE_URL` 默认值在 `config/settings.py` 的 `DEFAULT_BASE_URL`，环境变量优先。
 除这一处外，代码里不允许出现硬编码 URL、超时数值、路径。
 
-### 单跑与只跑冒烟
+### 三条常用命令
 
 ```bash
-python -m pytest tests/test_smoke.py -q      # 只问「今天能不能打开」
-python -m pytest -k "sh-bj" -q               # 只跑某条数据
+# 只看「今天能不能打开」
+python -m pytest suites/thirdparty -m ui -k smoke -q
+
+# 门禁吃的那份：只跑浏览器用例，产出独立 junit
+python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
+
+# 判定这份 junit（退出码 0=绿/黄，1=红，2=口径不成立）
+python tools/blocked_gate.py reports/junit-ui.xml
 ```
+
+`-m ui` 不是装饰：不带它跑出来的 junit 里混着 27 条数据层单测，
+门禁会直接判「口径混算」并拒绝出数（见 `docs/BLOCKED-GATE.md` §1）。
 
 ---
 
@@ -55,32 +64,41 @@ pages/base_page.py          有界等待、风控识别（detect_block）、失�
 pages/train_search_page.py  火车票页 POM：城市选择、日历选择、搜索、取结果状态
 utils/data_loader.py        读 YAML → 偏移量转日期 → parametrize 数据与 id
 test_data/search_cases.yaml 用例数据（只写「哪个区间、第几天、至少几条」）
-tests/test_smoke.py         冒烟：只打开页面、检测 blocked、记录 title/URL
-tests/test_train_search.py  功能：三层断言（结构 / 内容 / 辅助）
-tests/test_data_loader.py   数据层单测（27 项，不需要浏览器）
-conftest.py                 浏览器上下文、blocked→xfail、控件不可用→xfail、失败取证钩子
-tools/ci_blocked_report.py  从 junit.xml 统计 blocked，输出 CI 黄色告警
+suites/thirdparty/tests/    track B：真站点
+  test_smoke.py             冒烟：只打开页面、检测 blocked、记录 title/URL
+  test_train_search.py      功能：三层断言（结构 / 内容 / 辅助）
+  test_calendar_widget.py   K-01 的活样本，故意 skip，用来说明 known-limit 口径
+  test_data_loader.py       数据层单测（27 项，不需要浏览器，不带 ui 标记）
+suites/regression/          track A：容器靶站，空骨架，等 M1-3
+tools/blocked_gate.py       blocked 门禁判定器（规范：docs/BLOCKED-GATE.md）
+tools/ledger.py             ledger 记录的结构与校验
+tools/ledger_append.py      追加到 ops/metrics 分支并读回校验
+tools/tests/                门禁与账本自身的单测（35 项，不需要浏览器）
 tools/probes/               一次性定位器探针（不参与测试运行，留作取证）
-docs/locator-evidence/      探针结果 JSON 与拦截截图
+docs/BLOCKED-GATE.md        判定规则的唯一来源
+docs/KNOWN-LIMITATIONS.md   K-01 / K-02 / K-03
+docs/locator-evidence/      探针结果 JSON 与拦截截图（定位器的取证来源）
+conftest.py                 浏览器上下文、scope 标记、blocked→xfail、known-limit→skip、失败取证
 ```
 
 ---
 
 ## 四、blocked 是一等结果
 
-| 情况 | 处理 | 报告表现 | 退出码 |
-|---|---|---|---|
-| 页面正常 | 继续跑断言 | passed | 0 |
-| 滑块 / 验证码 / 限流文案 / WAF 纯文本页 | `pytest.xfail(reason="blocked by anti-bot: ...")` | `XFAIL`，附截图与 URL | 0 |
-| 自定义控件（日历）没按预期响应 | `pytest.xfail(reason="控件不可用: ...")` | `XFAIL`，附截图与 URL | 0 |
-| 断言失败、元素超时 | 普通失败 | `FAILED` | 1 |
+| 情况 | 处理 | 报告表现 |
+|---|---|---|
+| 页面正常 | 继续跑断言 | `passed` |
+| 滑块 / 验证码 / 限流文案 / WAF 纯文本页 | `pytest.xfail(reason="blocked: <signal>")` | `XFAIL` + 截图 + URL |
+| 自定义控件（日历）没按预期响应 | `pytest.skip(reason="known-limit: K-01 ...")` | `SKIPPED` + 截图 + URL |
+| 断言失败、元素超时 | 普通失败 | `FAILED` |
 
 `blocked` 用 xfail 而不是 fail，是因为它不说明代码坏了，只说明站点当天拒绝了自动化访问。
 **但它绝不用于掩盖普通失败**：`blocked_guard` 只捕获 `BlockedByAntiBot`，
 `widget_guard` 只捕获 `WidgetUnavailable`，其余异常原样上抛。
 
-CI 侧：`pytest` 因 xfail 仍返回 0，Job 保持绿色；`tools/ci_blocked_report.py`
-额外输出 `::warning::`，进 summary 供人查「今天被拦了几条」。
+**为什么分成两种前缀、怎么算、多红才算红** —— 全部在
+[`docs/BLOCKED-GATE.md`](docs/BLOCKED-GATE.md)。本节不复制那些规则：
+复制过的那份迟早跟规范不一样，而没人会发现自己看的是旧版。
 
 ---
 
@@ -91,7 +109,8 @@ CI 侧：`pytest` 因 xfail 仍返回 0，Job 保持绿色；`tools/ci_blocked_r
 | HTML 报告 | `reports/html/report.html` | 每次都产生 |
 | 失败/被拦截图 | `reports/screenshots/<nodeid>__viewport.png`、`__full.png` | 失败或 blocked 时 |
 | trace | `reports/trace/<用例名>/trace.zip` | **仅真实失败时**（`retain-on-failure`） |
-| junit | `reports/junit.xml` | 带 `--junitxml` 参数时 |
+| junit | `reports/junit-ui.xml`（门禁只认这份）| 带 `--junitxml=reports/junit-ui.xml` 时 |
+| 门禁记录 | `reports/gate-record.json` | `tools/blocked_gate.py` 每次运行都写 |
 
 ⚠️ 注意一条实测事实：**blocked 走的是 xfail，不算 failure，所以不会产出 trace**。
 若需要「被拦也留 trace」，只能把 `--tracing` 改成 `on`（每次都留，代价是体积与耗时），
@@ -118,15 +137,26 @@ CI 侧：`pytest` 因 xfail 仍返回 0，Job 保持绿色；`tools/ci_blocked_r
 
 ---
 
-## 七、本轮实测结果（2026-10-31 23:0x）
+## 七、本轮实测结果（2026-10-31 23:59，`-m ui` 口径）
 
 ```
-27 passed, 4 xfailed, 1 warning in 6.73s
-XFAIL tests/test_smoke.py::test_homepage_reachable[chromium] - blocked by anti-bot: waf_block（whaleguard）
-XFAIL tests/test_train_search.py::test_train_search[chromium-sh-bj-T+7-2026-11-07] - blocked by anti-bot: waf_block（whaleguard）
-XFAIL ... gz-sz-T+10-2026-11-10 ...
-XFAIL ... hz-nj-T+13-2026-11-13 ...
+1 skipped, 27 deselected, 4 xfailed, 1 warning in 10.04s
+XFAIL   test_train_search[chromium-sh-bj-T+7-2026-11-07]  - blocked: waf_block（whaleguard）
+XFAIL   test_train_search[chromium-gz-sz-T+10-2026-11-10] - blocked: waf_block（whaleguard）
+XFAIL   test_train_search[chromium-hz-nj-T+13-2026-11-13] - blocked: waf_block（whaleguard）
+XFAIL   test_smoke::test_homepage_reachable[chromium]      - blocked: waf_block（whaleguard）
+SKIPPED test_calendar_widget                              - known-limit: K-01 日历控件唤不起
 ```
+
+门禁对这份 junit 的判定（`tools/blocked_gate.py`，退出码 1）：
+
+```
+scope=ui  total=5  counted=4  blocked=4  pass=0  failed=0  known-limit=1  ratio=100.0%
+verdict: RED   触发: G1, G2
+```
+
+注意 `total=5` 与 `counted=4` 的差：K-01 那条 skip 不进分母，
+所以 `ratio` 是 4/4 而不是 4/5 —— 这是口径，不是笔误（见 `docs/BLOCKED-GATE.md` §2）。
 
 时间线（同一台机器、同一 IP、约 30 分钟内）：
 
@@ -144,8 +174,9 @@ XFAIL ... hz-nj-T+13-2026-11-13 ...
 
 1. **日期控件不稳定。** 2026-10-31 实测：日历 widget 前两次点击能弹出，之后多次尝试
    （点日期文字、点 `.date` 容器、JS focus、JS 派发 click、hover 后点击）都唤不起。
-   `select_date()` 不做重试，唤不起就抛 `WidgetUnavailable` → 用例 xfail 并留截图。
-   这条限制**没有绕过方案**，也与风控无关，是控件本身的行为。
+   `select_date()` 不做重试，唤不起就抛 `WidgetUnavailable` → 用例 `skip("known-limit: K-01 ...")`
+   并留截图。这条限制**没有绕过方案**，也与风控无关，是控件本身的行为。
+   编号化记录见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)。
 2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
 3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
 4. 目前只覆盖国内火车票查询；机票、酒店、登录态都没实现。
@@ -170,5 +201,6 @@ playwright 版本与已装内核版本必须一致（1.64.1 要 chromium-1248，
 国内下载慢可加镜像：`PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright`。
 
 **报告里 `XFAIL` 算不算通过？**
-不算通过也不算失败，是「预期内的失败」。看 `reason`：`blocked by anti-bot` 是被拦，
-`控件不可用` 是日期控件没响应，两者都不是代码缺陷，但都必须有人知道。
+不算通过也不算失败，是「预期内的失败」。看 `reason` 前缀：
+`blocked:` 是被对方拦下，`known-limit:` 是我们自己承认的限制（这两者都会让 CI 保持绿，
+但都不算 `effective_pass`）。两种前缀之外的 xfail/skip 会被门禁判为口径不成立。
