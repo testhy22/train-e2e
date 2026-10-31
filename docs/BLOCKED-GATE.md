@@ -127,6 +127,8 @@ G0/G1/G5/G6 照常——它们不是比例判定，不受样本量影响。
 | **父提交** | 每次先 fetch 当前 tip，在 worktree 里基于该 tip 提交，再快进 push | 禁止「孤儿 commit + force push」：那样 git 历史每天是互不相关的快照，出问题答不出「这条记录在哪次之后加的」 |
 | **并发** | CI `concurrency.group` 串行化 + 本地文件锁（`.git/blocked-ledger.lock`，600s 视为陈旧） | 两个写入者同时 fetch 会导致后者非快进，重试也救不了 |
 | **推完读回** | `gh api repos/<owner>/<repo>/contents/ops/blocked-ledger.jsonl?ref=ops/metrics --jq .content \| base64 -d`，逐行跑 schema 校验，任一失败即红 | 只相信 push 的退出码，等于相信「我说我推了」 |
+| **分账前遗留记录** | 分账（2026-11-01）之前以 `scope=ui` 写入的那条酒店运行（第 3 行，ratio 25%）**原样保留**；不提供 `scope` override，也不提供 legacy exclusion | 改写历史行 = 账本可被事后调整，G3/G4 从此不可复核；override 会把「分账」退化成「账本修正」。代价是 ui 轨道的 G3 被推迟（见 §8.6），所以**门禁输出必须点名该行**，不许让它悄悄压制趋势 |
+| **`provisional` 转正** | 字段在写入时固定、**永不回改**；「这条还能不能当单样本基线」是**读侧派生**的：同一 `scope` 出现第 2 条记录时，先前那条 `provisional: true` 自动降为普通历史样本 | 14 天校准窗口管的是阈值（§6 的三条），与单条记录的样本地位无关；把两者绑在一起，会让「阈值未校准」变成「这条记录永远不能转正」 |
 
 G3/G4 依赖历史，所以 ledger 丢失 = 这两条阈值失效。这也是不选 Actions cache 的原因
 （cache 7 天不用即清，会让趋势判定突然失忆）。
@@ -190,14 +192,29 @@ G3/G4 依赖历史，所以 ledger 丢失 = 这两条阈值失效。这也是不
 4. 门禁拒收旧格式 junit（无 `scope` 属性）。现场存证见
    `tools/tests/fixtures/junit-mixed-31.xml` 与
    `tools/tests/test_blocked_gate.py::test_旧格式junit没有scope属性必须被拒收`。
-5. 本文件的判定表有 9 个变异被测试杀死（ratio 分母换成 total、未知前缀静默跳过、
+5. 本文件的判定表有 13 个变异被测试杀死（ratio 分母换成 total、未知前缀静默跳过、
    不检查 scope、G1 退回旧写法、真失败不红，以及分轨相关的 4 个：历史不按轨道过滤、
-   记录 scope 写死 ui、聚合只比默认轨道、白名单不登记 ui_hotels），见 `tools/tests/`。
+   记录 scope 写死 ui、聚合只比默认轨道、白名单不登记 ui_hotels；遗留提示相关 4 个：
+   G3 窗口长度 3→2、遗留过滤去掉 `ratio` 条件、遗留提示恒不输出、遗留提示混进判定），
+   见 `tools/tests/`。
+6. **分账前遗留记录会推迟 G3，这是已知代价，不是故障。** ui 轨道第 3 行是分账前写入的
+   25%（酒店运行），append-only 下留在 ui 序列；G3 取 `series[-3:]`，因此它需要
+   **3 条**新 ui 记录才滑出窗口 —— 现有 3 条 ui 记录，G3 最早在**第 6 条 ui 记录**才可能命中。
+   门禁输出会点名该行（`legacy_notes`），避免把「G3 不触发」误读成阈值失灵。
+   时点由测试锁定：
+   `tools/tests/test_blocked_gate.py::test_分账前遗留的25记录在第6条ui记录后滑出窗口`。
 
 ---
 
 ## 9. 变更记录
 
+- **2026-11-01 v4**：两处遗留裁决落地，均不改账本历史行。
+  ① **第 3 行（分账前写进 `ui` 的酒店 25%）不改写**，接受 G3 推迟到第 6 条 ui 记录；
+  门禁新增 `legacy_notes()`，在输出与 Step Summary 里点名该行，明确「不是阈值问题、无 override」；
+  新增 3 条单测（第 6 条时点、点名且不改判不改行、单轨道时不猜分账点）+ 4 个变异全杀死。
+  ② **`provisional` 转正条件写死为读侧派生**：同 `scope` 出现第 2 条记录即自动降为普通历史样本，
+  不改行；否决「14 天校准后转正」（校准管阈值，不管单条记录的样本地位）。
+  `top_signal` 旧格式不改，仍按前缀匹配；结构化 `top_signal_key` 留到 14 天校准后再议。
 - **2026-11-01 v3**：账本按轨道分账。`scope` 白名单 `{ui, ui_hotels}`（登记在 `ledger.GATE_SCOPES`），
   门禁新增 `--scope` 声明本次判哪条轨道，junit 口径不符即 exit 2；**G3/G4 改为只在同一 `scope` 内累计**，
   输出写明本轨道用了几条历史。理由：酒店那条 25% 打断了火车票的 1.0 序列，G3 永不触发。

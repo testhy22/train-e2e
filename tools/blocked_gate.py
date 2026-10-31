@@ -285,6 +285,60 @@ def evaluate(
     return verdict, triggered, unavailable
 
 
+# ---------------------------------------------------------------- 遗留记录提示
+
+def legacy_notes(history: list[dict], scope: str) -> list[str]:
+    """把「分账前遗留记录」说出来，不改判定、不改账本。
+
+    背景（2026-11-01 分账时真实发生）：一条酒店运行（ratio 25%）已经以 `scope=ui`
+    写进了账本。按 append-only 它不能改写，也不给 override / legacy exclusion，
+    于是它会继续占据 G3 的「最近连续 3 次」窗口。
+
+    不把这件事写进输出，看板只会看到「火车票 G3 突然不触发了」，
+    然后去怀疑阈值 —— 而阈值是 provisional、最容易被当成原因的那个。
+    所以这里只做一件事：**把历史里那条记录指出来**。
+
+    判定方式不猜、不看 note 文本：**分账边界 = 账本里另一条轨道第一次出现的 ts**，
+    本轨道中 ts 早于该边界、且 `ratio < T_RATIO_TREND` 的记录即为压制源。
+    账本还没有第二条轨道时返回空 —— 那时没有「分账前」可言，宁可不说。
+    """
+    def ts_of(record: dict) -> datetime | None:
+        try:
+            return datetime.fromisoformat(ledger.normalize_ts(record.get("ts", "")))
+        except ledger.SchemaError:
+            return None
+
+    others = [t for t in (ts_of(r) for r in history if r.get("scope") != scope) if t is not None]
+    if not others:
+        return []
+
+    split_at = min(others)
+    legacy = []
+    for record in history:
+        if record.get("scope") != scope:
+            continue
+        ts = ts_of(record)
+        if ts is not None and ts < split_at and float(record.get("ratio", 0.0)) < T_RATIO_TREND:
+            legacy.append((ts, record))
+
+    if not legacy:
+        return []
+
+    detail = "；".join(
+        f"ts={ts.isoformat()}, ratio={float(r.get('ratio', 0.0)):.1%}" for ts, r in legacy
+    )
+    return [
+        (
+            f"分账前遗留记录：scope={scope} 有 {len(legacy)} 条 ratio<{T_RATIO_TREND:.0%} 的行（{detail}），"
+            f"写入早于另一轨道首次出现的 {split_at.isoformat()}"
+        ),
+        (
+            f"  按 append-only 不改写、不提供 override/legacy exclusion；"
+            f"这些行仍占 {T_TREND_RUNS} 次窗口，在它们滑出前 G3 不会触发（这不是阈值问题）"
+        ),
+    ]
+
+
 # ---------------------------------------------------------------- 记录
 
 def build_record(stats: Stats, verdict: str, gates: list[str], *, ts: str, run: str, source: str,
@@ -326,7 +380,7 @@ def junit_ts(path: Path) -> str:
 
 def render(
     stats: Stats, verdict: str, gates: list[str], unavailable: list[str], problems: list[str],
-    scope: str = DEFAULT_SCOPE, history_note: str = "",
+    scope: str = DEFAULT_SCOPE, history_note: str = "", notes: list[str] | None = None,
 ) -> str:
     mark = "  [provisional：阈值未校准，见 docs/BLOCKED-GATE.md §6]" if PROVISIONAL else ""
     lines = [
@@ -339,6 +393,8 @@ def render(
     ]
     if history_note:
         lines.append(f"  {history_note}")
+    for item in notes or []:
+        lines.append(f"  · {item}" if not item.startswith("  ") else f"  {item}")
     lines.append(f"  verdict: {verdict}   触发: {', '.join(gates) or '(无)'}")
     if stats.top_signal:
         lines.append(f"  主要信号: {stats.top_signal}")
@@ -349,7 +405,7 @@ def render(
     return "\n".join(lines)
 
 
-def annotate(verdict: str, stats: Stats, gates: list[str]) -> None:
+def annotate(verdict: str, stats: Stats, gates: list[str], notes: list[str] | None = None) -> None:
     if os.getenv("GITHUB_ACTIONS") != "true":
         return
     if verdict == "RED":
@@ -369,6 +425,7 @@ def annotate(verdict: str, stats: Stats, gates: list[str]) -> None:
             fh.write(f"| blocked / pass / failed / known-limit | "
                      f"{stats.blocked} / {stats.effective_pass} / {stats.failed} / {stats.known_limit} |\n")
             fh.write(f"| ratio（blocked÷counted） | {stats.ratio:.1%} |\n")
+            fh.writelines(f"\n> {note.strip()}\n" for note in notes or [])
 
 
 # ---------------------------------------------------------------- CLI
@@ -427,8 +484,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     verdict, gates, unavailable = evaluate(stats, history, today, scope=args.scope)
-    print(render(stats, verdict, gates, unavailable, [], scope=args.scope, history_note=history_note))
-    annotate(verdict, stats, gates)
+    notes = legacy_notes(history, args.scope)
+    print(render(stats, verdict, gates, unavailable, [], scope=args.scope,
+                 history_note=history_note, notes=notes))
+    annotate(verdict, stats, gates, notes=notes)
 
     record = build_record(
         stats, verdict, gates, ts=ts, run=args.run, source=args.source,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
@@ -389,6 +390,88 @@ def test_记录scope跟随所判轨道(tmp_path, capsys):
 
     assert record["scope"] == "ui_hotels", "写进账本的 scope 必须是所判轨道，不是默认 ui"
     assert ledger.validate_record(record) == [] or isinstance(ledger.validate_record(record), list)
+
+
+# ---------------------------------------------------------------- 分账前遗留记录（裁决 2026-11-01）
+
+def test_分账前遗留的25记录在第6条ui记录后滑出窗口():
+    """锁死 `ops/README.md` 那句「ui 轨道 G3 预计在第 6 条 ui 记录后恢复」。
+
+    账本现有 3 条 ui：1.0 / 1.0 / 0.25。G3 看的是 `series[-3:]`，所以那条 0.25
+    要真正滑出窗口，需要**三条**新记录：
+
+        第 4 条 ⇒ 末三位 [1.0, 0.25, 新]   仍含 0.25  ⇒ 不触发
+        第 5 条 ⇒ 末三位 [0.25, 新, 新]    仍含 0.25  ⇒ 不触发
+        第 6 条 ⇒ 末三位 [新, 新, 新]      0.25 滑出  ⇒ 才可能触发
+
+    即「再新增 2 条就恢复」是错的（差一条）。这条测试就是那句话的证伪器：
+    谁改切片逻辑或改窗口长度，它先红。
+    """
+    history = [
+        make_record(ts="2026-10-31T00:05:00+08:00", blocked=4, passed=0,
+                    verdict="RED", gate="G1,G2"),
+        make_record(ts="2026-11-01T00:06:15+08:00", blocked=4, passed=0,
+                    verdict="RED", gate="G1,G2"),
+        make_record(ts="2026-11-01T00:31:28+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5"),
+    ]
+    assert [r["ratio"] for r in history] == [1.0, 1.0, 0.25]
+
+    stats = blocked_gate.Stats(total=4, blocked=4, effective_pass=0)
+    hits: dict[int, bool] = {}
+    for nth in (4, 5, 6):
+        _, gates, _ = blocked_gate.evaluate(stats, history, date(2026, 11, 1), scope="ui")
+        hits[nth] = "G3" in gates
+        history = history + [make_record(ts=f"2026-11-01T0{nth}:00:00+08:00",
+                                        blocked=4, passed=0, verdict="RED", gate="G1,G2")]
+
+    assert hits == {4: False, 5: False, 6: True}, f"G3 恢复时点与 README 不符：{hits}"
+
+
+def test_分账前遗留记录要点名_但不改判也不改行(tmp_path, capsys):
+    """遗留行必须被说出来，且只说不改：verdict 与账本字节都不能动。"""
+    history = [
+        make_record(ts="2026-10-31T00:05:00+08:00", blocked=4, passed=0,
+                    verdict="RED", gate="G1,G2"),
+        make_record(ts="2026-11-01T00:31:28+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5"),
+        make_record(ts="2026-11-01T00:43:26+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5", scope="ui_hotels"),
+    ]
+    junit = write_junit(
+        tmp_path,
+        [blocked_case("t0"), _case("p1", "pass"), _case("p2", "pass"), _case("p3", "pass")],
+    )
+    ledger_path = write_ledger(tmp_path, history)
+    before = ledger_path.read_text(encoding="utf-8")
+
+    code, record, text = run_gate(tmp_path, junit, ledger_path, capsys=capsys)
+
+    assert "分账前遗留记录" in text, "不说出来，看板只会以为 G3 坏了"
+    assert "ts=2026-11-01T00:31:28+08:00" in text, "要指认到具体行，不能只说「有遗留」"
+    assert "有 1 条 ratio<30% 的行" in text, (
+        "只能点名真正压制 G3 的那条（<30%）；把 ratio=1.0 的历史行也算进来等于噪声"
+    )
+    assert "override" in text, "要写明不提供 override，否则下一个人会去找那个开关"
+    assert record["gate"] == "G5" and code == blocked_gate.EXIT_OK, (
+        f"遗留提示不得改变判定：{record['verdict']}/{record['gate']}"
+    )
+    assert ledger_path.read_text(encoding="utf-8") == before, "提示只是读，不许回写账本"
+
+
+def test_只有一条轨道时不猜分账点(tmp_path, capsys):
+    """账本里还没有第二条轨道时，没有「分账前」可言 —— 不许凭空造一条提示。"""
+    history = [
+        make_record(ts="2026-10-31T00:05:00+08:00", blocked=1, passed=3,
+                    verdict="YELLOW", gate="G5"),
+    ]
+    junit = write_junit(
+        tmp_path,
+        [blocked_case("t0"), _case("p1", "pass"), _case("p2", "pass"), _case("p3", "pass")],
+    )
+    _, _, text = run_gate(tmp_path, junit, write_ledger(tmp_path, history), capsys=capsys)
+
+    assert "分账前遗留记录" not in text
 
 
 # ---------------------------------------------------------------- 记录与幂等

@@ -87,3 +87,81 @@ jobs:
         run: |
           echo "::error::门禁或用例失败，详见上一步输出与 reports/gate-record.json"
           exit 1
+
+# ---------------------------------------------------------------- 酒店轨道（草案，未启用）
+#
+# 启用条件（三者全齐，缺一不动）：
+#   1. 账本分轨稳定：ui / ui_hotels 各自连续写入，不再出现跨轨道混算；
+#   2. 14 天阈值校准完成（docs/BLOCKED-GATE.md §6），PROVISIONAL 置 False；
+#   3. 手动跑通本 job 至少一次：workflow_dispatch 单独跑，确认 verdict / gate / ratio 与账本一致。
+#
+# 三处必须同时改，漏一处就 exit 2（这是兜底，不是障碍）：
+#   pytest -m hotels · --junitxml=reports/junit-hotels.xml · --scope ui_hotels
+# junit 按轨道分文件名（junit-ui.xml / junit-hotels.xml）：两个轨道混进一份文件，
+# 门禁会报「混入了别的轨道（…×N）」并 exit 2，不会算出数来。
+# 本轮只落草案：打开方式是把下面每行的 "# " 去掉（行内缩进会保留），再按上面三条确认。
+#
+#   hotels:
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 30
+#     env:
+#       BASE_URL: https://www.ctrip.com
+#
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.12"
+#           cache: pip
+#
+#       - name: 安装依赖
+#         run: |
+#           python -m pip install --upgrade pip
+#           python -m pip install -r requirements.txt
+#
+#       - name: 安装浏览器
+#         run: python -m playwright install --with-deps chromium
+#
+#       - name: 取回 ledger（G3/G4 要历史）
+#         run: |
+#           mkdir -p .ledger
+#           git fetch origin ops/metrics
+#           git show FETCH_HEAD:ops/blocked-ledger.jsonl > .ledger/blocked-ledger.jsonl
+#           echo "已取回 $(wc -l < .ledger/blocked-ledger.jsonl) 行历史"
+#
+#       - name: 酒店用例（独立 junit，供门禁消费）
+#         id: hotels
+#         continue-on-error: true
+#         run: |
+#           mkdir -p reports
+#           python -m pytest suites/hotels -m hotels --junitxml=reports/junit-hotels.xml
+#
+#       - name: blocked 门禁（酒店轨道）
+#         id: gate
+#         continue-on-error: true
+#         run: |
+#           python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels \
+#             --ledger .ledger/blocked-ledger.jsonl \
+#             --record-out reports/gate-record-hotels.json
+#
+#       - name: 追加 ledger 并读回校验
+#         if: always() && steps.gate.outcome != 'skipped'
+#         run: python tools/ledger_append.py reports/gate-record-hotels.json
+#
+#       - name: 上传证据
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: e2e-evidence-hotels-${{ github.run_id }}
+#           path: |
+#             reports/
+#             .ledger/
+#           retention-days: 14
+#           if-no-files-found: warn
+#
+#       - name: 门禁红 / 契约不成立 / 真失败 ⇒ job 红
+#         if: steps.gate.outcome == 'failure' || steps.hotels.outcome == 'failure'
+#         run: |
+#           echo "::error::酒店轨道门禁用例失败，详见上一步输出与 reports/gate-record-hotels.json"
+#           exit 1
