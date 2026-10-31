@@ -1,0 +1,60 @@
+name: ctrip-train-e2e
+
+# 只跑定时与手动：真页面测试挂在 push 上会被限流，也会拖慢每次迭代。
+on:
+  schedule:
+    - cron: "0 22 * * *"      # UTC 22:00 = 北京时间 06:00
+  workflow_dispatch:
+
+concurrency:
+  group: ctrip-train-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_URL: https://trains.ctrip.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 安装浏览器
+        run: python -m playwright install --with-deps chromium
+
+      - name: 运行 E2E
+        id: run
+        continue-on-error: true
+        run: |
+          python -m pytest -q --junitxml=reports/junit.xml
+
+      - name: 汇总 blocked（黄色告警，不标红）
+        if: always()
+        run: python tools/ci_blocked_report.py reports/junit.xml
+
+      - name: 上传证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-evidence-${{ github.run_id }}
+          path: |
+            reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: 真正的失败才让 Job 变红
+        if: steps.run.outcome == 'failure'
+        run: |
+          echo "::error::pytest 以非 0 退出（blocked 不会导致非 0，只有真实失败才会）"
+          exit 1

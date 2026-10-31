@@ -1,0 +1,65 @@
+{
+  "fill": {
+    "suggest_visible": true,
+    "panel": "[class*=city]#5: 上海 / 北京 / 杭州 / 广州 / 南京 / 天津 / 武汉 / 西安"
+  },
+  "press_sequentially": {
+    "suggest_visible": true,
+    "panel": "[class*=city]#5: 上海 / 北京 / 杭州 / 广州 / 南京 / 天津 / 武汉 / 西安"
+  },
+  "date_trigger": {
+    "tag": "DIV",
+    "cls": "search-date",
+    "text": "出发日期\n2026-10-31\n星期六\n添加返程"
+  },
+  "date_panel": [],
+  "day_cells": [],
+  "list": {
+    "url": "https://trains.ctrip.com/webapp/train/list?ticketType=0&dStation=%E5%B9%BF%E5%B7%9E&aStation=%E6%B7%B1%E5%9C%B3&dDate=2026-11-07&rDate=&trainsType=&hubCityName=&highSpeedOnly=0",
+    "title": "广州到深圳火车票预订与代购-高铁票价,动车票价-高铁订票,动车订票网-携程火车票订购中心",
+    "train_no_count": 563,
+    "rows": [
+      {
+        "cls": "card-white list-item",
+        "len": 44,
+        "head": "06:10 广州东 1时12分 C7001 07:22 深圳 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 45,
+        "head": "06:10 广州白云 1时55分 C7005 08:05 深圳 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 45,
+        "head": "06:18 广州南 0时29分 G3017 06:47 深圳北 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 45,
+        "head": "06:23 广州南 0时39分 G6245 07:02 深圳北 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 43,
+        "head": "06:23 广州 1时42分 C7005 08:05 深圳 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 45,
+        "head": "06:25 广州东 1时17分 D7577 07:42 深圳北 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 44,
+        "head": "06:25 广州东 1时30分 D7577 07:55 福田 登录可查看余票/票价去登录"
+      },
+      {
+        "cls": "card-white list-item",
+        "len": 51,
+        "head": "成功率：较高 06:25 广州北 1时53分 D901 08:18 深圳北 登录可查看余票/票价去登录"
+      }
+    ],
+    "body_head": "酒店\n机票\n火车票\n旅游\n门票·活动\n汽车·船票\n用车\nAI行程助手\nNEW\n攻略·景点\n旅游地图\n全球购\n礼品卡\n携程金融\n企业商旅\n老友会\n关于携程\n携程旅行网\n登录\n注册\n我的订单\n联系客服\n出发城市\n到达城市\n出发日期\n2026-11-07\n星期六\n添加返程\n搜索\n广州-深圳 单程 2026-11-07 (共557车次)\n火车票>广州到深圳火车票\n11-05\n周四\n11-06\n周五\n11-07\n周六\n11-08\n周日\n11-09\n周一\n11-10\n周二\n出发\n早 - 晚\n运行时长\n价格排序\n06:10\n广州东\n1时12分\nC7001\n07:22\n深圳\n登录可查看余票/票价去登录\n二等座\n72\n预订\n一等座\n90\n预订\n无座\n72\n预订\n06:10\n广州白云\n1时55分\nC7005\n08:05\n深圳\n登录可查看余票/票价去登录\n二等座\n72\n预订\n一等座\n90\n预订\n无座\n72\n预订\n06:18\n广州南\n0时29分\nG3017\n06:47\n深圳北\n登录可查看余票/票价去登录\n二等座\n74.5\n预订\n一等座\n99.5\n预订\n商务座\n199.5\n预订\n无座\n74.5\n抢票\n06:23"
+  }
+}

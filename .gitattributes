@@ -1,0 +1,7 @@
+# 统一换行：仓库内存 LF，Windows 检出也不改动（CI 在 Linux 上跑）
+* text=auto eol=lf
+
+# 二进制，不做换行处理
+*.png binary
+*.zip binary
+*.jpg binary

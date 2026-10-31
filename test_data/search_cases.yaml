@@ -1,0 +1,33 @@
+# 用例数据契约
+#
+# 字段说明
+#   id                  用例标识，只用字母数字与 - _
+#   from_city/to_city   城市名，必须能命中目标站点的联想下拉
+#   depart_offset_days  相对今天的天数，下限 +3、上限 +15（预售期，越界直接报错）
+#   min_results         结果条目数下界，默认 1
+#   expected_keyword    弱条件，只写进日志与报告，不参与 pass/fail
+#
+# 为什么用偏移量而不是写死日期：
+# 写死的日期今天能跑、明天就是过去时。车次查询的语义是「未来可取的车次」，
+# 日期一旦落到当天且已过末班车，结果必然为空，用例会红得毫无信息量。
+
+- id: sh-bj
+  from_city: 上海
+  to_city: 北京
+  depart_offset_days: 7
+  min_results: 1
+  expected_keyword: 车次
+
+- id: gz-sz
+  from_city: 广州
+  to_city: 深圳
+  depart_offset_days: 10
+  min_results: 1
+  expected_keyword: 车次
+
+- id: hz-nj
+  from_city: 杭州
+  to_city: 南京
+  depart_offset_days: 13
+  min_results: 1
+  expected_keyword: 车次

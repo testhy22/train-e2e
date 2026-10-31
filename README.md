@@ -1,0 +1,174 @@
+# ctrip-train-e2e
+
+携程火车票查询的浏览器驱动 E2E，按 Page Object Model 组织，数据驱动，失败留证。
+
+**定位：合规、不绕过任何风控。** 目标站点拒绝自动化访问时，本工程不会伪装身份继续访问，
+而是把 `blocked` 当作一等结果记录进报告。这不是妥协，是设计前提。
+
+---
+
+## 一、工程规则（原文，接手人请照此执行）
+
+1. 禁止把定位器和业务操作写在测试函数里；测试只做「编排 + 断言」，元素与交互封装在 `pages/`。
+2. **禁止用裸 `time.sleep()` / `page.wait_for_timeout()` 做同步等待**，一律用 Playwright
+   自动等待或显式 `expect(...)` 条件等待。
+   —— 允许：`press_sequentially(delay=60~120)` 模拟输入节奏、`expect(locator).to_be_visible()`。
+3. 测试数据不得硬编码在测试文件内，全部写进 `test_data/*.yaml`。
+4. 失败必须留下证据：截图 + URL + title 写进报告；trace 用 `retain-on-failure`。
+5. 选择器优先语义定位（`get_by_role` / `get_by_placeholder` / `get_by_text`），避免层级 CSS。
+6. 城市输入优先 `fill()`；实测 `fill` 触发不了联想时才退到 `press_sequentially`，
+   并在注释里写明「功能必要，非规避手段」。
+7. 每条用例可独立运行，不依赖前一条的状态。
+8. **不写任何反检测代码**：不改 UA、不加 `--disable-blink-features=AutomationControlled`、
+   不做以「规避识别」为目的的随机节奏。被拦就如实记录。
+
+---
+
+## 二、跑起来
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium        # 需与 playwright 版本匹配，见「常见问题」
+
+python -m pytest                             # 无头，默认指向 https://trains.ctrip.com
+HEADED=1 python -m pytest tests/test_smoke.py    # 有头，本地调试
+BASE_URL=https://your-site.example python -m pytest   # 换目标站
+```
+
+`BASE_URL` 默认值在 `config/settings.py` 的 `DEFAULT_BASE_URL`，环境变量优先。
+除这一处外，代码里不允许出现硬编码 URL、超时数值、路径。
+
+### 单跑与只跑冒烟
+
+```bash
+python -m pytest tests/test_smoke.py -q      # 只问「今天能不能打开」
+python -m pytest -k "sh-bj" -q               # 只跑某条数据
+```
+
+---
+
+## 三、目录与职责
+
+```
+config/settings.py          唯一配置出口：站点、超时、视口、预售期常量、证据目录
+pages/base_page.py          有界等待、风控识别（detect_block）、失败截图
+pages/train_search_page.py  火车票页 POM：城市选择、日历选择、搜索、取结果状态
+utils/data_loader.py        读 YAML → 偏移量转日期 → parametrize 数据与 id
+test_data/search_cases.yaml 用例数据（只写「哪个区间、第几天、至少几条」）
+tests/test_smoke.py         冒烟：只打开页面、检测 blocked、记录 title/URL
+tests/test_train_search.py  功能：三层断言（结构 / 内容 / 辅助）
+tests/test_data_loader.py   数据层单测（27 项，不需要浏览器）
+conftest.py                 浏览器上下文、blocked→xfail、控件不可用→xfail、失败取证钩子
+tools/ci_blocked_report.py  从 junit.xml 统计 blocked，输出 CI 黄色告警
+tools/probes/               一次性定位器探针（不参与测试运行，留作取证）
+docs/locator-evidence/      探针结果 JSON 与拦截截图
+```
+
+---
+
+## 四、blocked 是一等结果
+
+| 情况 | 处理 | 报告表现 | 退出码 |
+|---|---|---|---|
+| 页面正常 | 继续跑断言 | passed | 0 |
+| 滑块 / 验证码 / 限流文案 / WAF 纯文本页 | `pytest.xfail(reason="blocked by anti-bot: ...")` | `XFAIL`，附截图与 URL | 0 |
+| 自定义控件（日历）没按预期响应 | `pytest.xfail(reason="控件不可用: ...")` | `XFAIL`，附截图与 URL | 0 |
+| 断言失败、元素超时 | 普通失败 | `FAILED` | 1 |
+
+`blocked` 用 xfail 而不是 fail，是因为它不说明代码坏了，只说明站点当天拒绝了自动化访问。
+**但它绝不用于掩盖普通失败**：`blocked_guard` 只捕获 `BlockedByAntiBot`，
+`widget_guard` 只捕获 `WidgetUnavailable`，其余异常原样上抛。
+
+CI 侧：`pytest` 因 xfail 仍返回 0，Job 保持绿色；`tools/ci_blocked_report.py`
+额外输出 `::warning::`，进 summary 供人查「今天被拦了几条」。
+
+---
+
+## 五、证据在哪
+
+| 产物 | 路径 | 何时产生 |
+|---|---|---|
+| HTML 报告 | `reports/html/report.html` | 每次都产生 |
+| 失败/被拦截图 | `reports/screenshots/<nodeid>__viewport.png`、`__full.png` | 失败或 blocked 时 |
+| trace | `reports/trace/<用例名>/trace.zip` | **仅真实失败时**（`retain-on-failure`） |
+| junit | `reports/junit.xml` | 带 `--junitxml` 参数时 |
+
+⚠️ 注意一条实测事实：**blocked 走的是 xfail，不算 failure，所以不会产出 trace**。
+若需要「被拦也留 trace」，只能把 `--tracing` 改成 `on`（每次都留，代价是体积与耗时），
+或把 blocked 当失败处理（与本节设计冲突）。当前选择是「blocked 不留 trace，但必有截图 + URL」。
+
+---
+
+## 六、定位器从哪来（不是猜的）
+
+2026-10-31 用 `tools/probes/` 下的脚本逐个实测，原始输出存 `docs/locator-evidence/`：
+
+| 元素 | 定位器 | 依据 |
+|---|---|---|
+| 出发城市 | `#label-departStation` | probe.json：`id` 稳定，placeholder=出发城市，可见 |
+| 到达城市 | `#label-arriveStation` | 同上 |
+| 日期输入 | `#label-departDate` | 真实 `<input>`，被 `assist-*-dom` 类隐藏，值形如 `2026-10-31` |
+| 日历容器 | `.widget-calendar-depart-wrap` | probe8：遮罩 `.widget-calendar-mask` 会拦住搜索按钮点击 |
+| 搜索按钮 | `role=button[name="搜索"]` | probe.json buttons 列表 |
+| 结果列表项 | `.list-item` | interact2.json：`card-white list-item`，文本含「06:10 广州东 1时12分 C7001」 |
+| 车次号 | `^[GDCZTK]\d{1,4}$` | 结果页实际值 C7001 / G3017 / D7577 / G6025 |
+| 结果页 URL | `/webapp/train/list?...&dDate=YYYY-MM-DD` | 实点搜索后抓到的真实 URL |
+
+页面改版时**只改这一个文件**，测试不用动。
+
+---
+
+## 七、本轮实测结果（2026-10-31 23:0x）
+
+```
+27 passed, 4 xfailed, 1 warning in 6.73s
+XFAIL tests/test_smoke.py::test_homepage_reachable[chromium] - blocked by anti-bot: waf_block（whaleguard）
+XFAIL tests/test_train_search.py::test_train_search[chromium-sh-bj-T+7-2026-11-07] - blocked by anti-bot: waf_block（whaleguard）
+XFAIL ... gz-sz-T+10-2026-11-10 ...
+XFAIL ... hz-nj-T+13-2026-11-13 ...
+```
+
+时间线（同一台机器、同一 IP、约 30 分钟内）：
+
+1. 23:0x 起连续多次打开首页 → **完全正常**，拿到全部定位器，并成功完成一次真实查询
+   （广州→深圳，结果页显示「共 1 车次」，抓到了 G6025 广州南→深圳北）。
+2. 约十余次访问后 → 整页只剩 `whaleguard block`，`<title>` 为空，即携程 WAF 开始拦截。
+   截图：`docs/locator-evidence/blocked-whaleguard.png`。
+3. 拦截出现后，所有用例如实转 xfail，没有一条被伪装成通过。
+
+**这就是本工程存在的意义**：拦截是可观测的事实，不是需要掩盖的失败。
+
+---
+
+## 八、已知限制（务必读）
+
+1. **日期控件不稳定。** 2026-10-31 实测：日历 widget 前两次点击能弹出，之后多次尝试
+   （点日期文字、点 `.date` 容器、JS focus、JS 派发 click、hover 后点击）都唤不起。
+   `select_date()` 不做重试，唤不起就抛 `WidgetUnavailable` → 用例 xfail 并留截图。
+   这条限制**没有绕过方案**，也与风控无关，是控件本身的行为。
+2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
+3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
+4. 目前只覆盖国内火车票查询；机票、酒店、登录态都没实现。
+5. 登录态一律不碰：本工程不登录、不提交订单、不进入支付流程。
+
+---
+
+## 九、常见问题
+
+**pip 装不上，清华源返回 403。**
+本文档记录：`pypi.tuna.tsinghua.edu.cn` 用 curl 访问是 200，但 pip 报 403。
+换阿里云源即可：
+
+```bash
+python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r requirements.txt
+```
+
+**`Executable doesn't exist at ...chromium-XXXX`。**
+playwright 版本与已装内核版本必须一致（1.64.1 要 chromium-1248，旧内核是 1243）。
+执行 `python -m playwright install chromium` 补装，**不要**用 `PLAYWRIGHT_BROWSERS_PATH`
+指向旧内核——版本错配的坑远比 150MB 贵。
+国内下载慢可加镜像：`PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright`。
+
+**报告里 `XFAIL` 算不算通过？**
+不算通过也不算失败，是「预期内的失败」。看 `reason`：`blocked by anti-bot` 是被拦，
+`控件不可用` 是日期控件没响应，两者都不是代码缺陷，但都必须有人知道。
