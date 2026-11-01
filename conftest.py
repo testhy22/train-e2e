@@ -73,10 +73,17 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 def browser_type_launch_args(browser_type_launch_args):
     """让 settings.HEADLESS 真正生效：HEADED=1 时用有头模式，CI 用无头。
 
-    启动参数保持默认。不加 --disable-blink-features=AutomationControlled 之类的
-    自动化隐藏参数：本工程不改变浏览器暴露给站点的身份。
+    只追加 `settings.BROWSER_UI_ARGS`（关翻译条 / 首次运行引导 / 密码保存气泡）。
+    这些是**浏览器自己的浮层开关**，不是自动化隐藏参数 —— 不加
+    --disable-blink-features=AutomationControlled 之类，本工程不改变浏览器
+    暴露给站点的身份。两者边界见 config/settings.py 的 BROWSER_UI_ARGS 注释。
     """
-    return {**browser_type_launch_args, "headless": settings.HEADLESS}
+    existing = list(browser_type_launch_args.get("args") or [])
+    return {
+        **browser_type_launch_args,
+        "headless": settings.HEADLESS,
+        "args": [*existing, *settings.BROWSER_UI_ARGS],
+    }
 
 
 @pytest.fixture
@@ -108,9 +115,8 @@ def browser_context_args(browser_context_args):
 
 # ---------------------------------------------------------------- 登录态轨道（2026-11-01）
 
-@pytest.fixture(scope="session")
-def auth_state() -> Path:
-    """登录态文件路径；缺失就 skip 整条 auth 轨道。
+def _require_auth_state(entry: str, code: str) -> Path:
+    """取某个入口站的 state 文件路径；缺失就 skip 整条轨道。
 
     为什么是 skip 不是 fail：这份文件由**真人扫码**产生，CI 里永远不会有
     （config/settings.py 的「登录态」段已写明凭据不进 CI）。用 fail 会让 main 上
@@ -119,15 +125,64 @@ def auth_state() -> Path:
 
     为什么用 known-limit 前缀而不是 blocked：这不是「对方拦我们」，
     是我们自己缺一份本地凭据。blocked 会计入 ratio，known-limit 不进分母。
+
+    为什么按入口分文件（2026-11-01 实测）：www 的 state 打开 trains.ctrip.com
+    仍判未登录 —— 两站登录态不互通。共用一份文件会让 `--entry trains`
+    静默覆盖掉 www 会话，之后 www 用例莫名报「未登录」而没人知道为什么。
     """
-    path = settings.auth_state_path()
+    path = settings.auth_state_path(entry)
     if not path.exists():
+        flag = "" if entry == "www" else f" --entry {entry}"
         pytest.skip(
-            "known-limit: AUTH-01 未找到登录态文件 "
+            f"known-limit: {code} 未找到登录态文件 "
             f"{path.relative_to(settings.PROJECT_ROOT)}；"
-            "先在有头环境运行 python scripts/setup_auth.py"
+            f"先在有头环境运行 python scripts/setup_auth.py{flag}"
         )
     return path
+
+
+def _build_auth_context(
+    browser: Browser,
+    state: Path,
+    context_args: dict,
+    request: pytest.FixtureRequest,
+    label: str,
+) -> BrowserContext:
+    """用指定 state 开一个独立 context。
+
+    为什么独立开 context、而不是给全局 `page` 挂 storage_state：
+    酒店轨道的断言依赖「匿名态」这个实验条件（提交路径落 passport、落点写进报告），
+    混进登录态就把条件改了，报告里 `login_wall=` 会从 True 变 False ——
+    读报告的人会以为登录墙放开了，而不是我们换了张脸。
+    要全局生效只能显式设 AUTH_GLOBAL=1，并自己承担上面这个语义变化。
+    """
+    context = browser.new_context(**{**context_args, "storage_state": str(state)})
+
+    age_days = (time.time() - state.stat().st_mtime) / 86400
+    stale = age_days > settings.AUTH_STATE_TTL_DAYS
+    detail = (
+        f"文件：{state.name}\n"
+        f"入口：{label}\n"
+        f"已存放：{age_days:.1f} 天（建议阈值 {settings.AUTH_STATE_TTL_DAYS} 天）\n"
+        f"超阈值：{'是 —— 只提示，不判失效' if stale else '否'}"
+    )
+    request.node.add_report_section("setup", "登录态", detail)
+
+    if stale:
+        # 过期只告警：mtime 说明「存了多久」，说明不了「还有没有效」，
+        # 拿它判失效会造出假失败。真失效时下面的断言会红，那才是证据。
+        warnings.warn(
+            f"登录态（{state.name}）已存放 {age_days:.1f} 天，超过建议阈值 "
+            f"{settings.AUTH_STATE_TTL_DAYS} 天；若断言红，先重跑 scripts/setup_auth.py",
+            stacklevel=2,
+        )
+    return context
+
+
+@pytest.fixture(scope="session")
+def auth_state() -> Path:
+    """www 站登录态文件（默认入口）。"""
+    return _require_auth_state("www", "AUTH-01")
 
 
 @pytest.fixture(scope="session")
@@ -144,35 +199,8 @@ def auth_context(
     browser_context_args: dict,
     request: pytest.FixtureRequest,
 ) -> BrowserContext:
-    """带登录态的独立 context，只给 `@pytest.mark.auth` 的用例用。
-
-    为什么独立开 context、而不是给全局 `page` 挂 storage_state：
-    酒店轨道的断言依赖「匿名态」这个实验条件（提交路径落 passport、落点写进报告），
-    混进登录态就把条件改了，报告里 `login_wall=` 会从 True 变 False ——
-    读报告的人会以为登录墙放开了，而不是我们换了张脸。
-    要全局生效只能显式设 AUTH_GLOBAL=1，并自己承担上面这个语义变化。
-    """
-    context = browser.new_context(
-        **{**browser_context_args, "storage_state": str(auth_state)}
-    )
-
-    stale = auth_state_age_days > settings.AUTH_STATE_TTL_DAYS
-    detail = (
-        f"文件：{auth_state.name}\n"
-        f"已存放：{auth_state_age_days:.1f} 天（建议阈值 {settings.AUTH_STATE_TTL_DAYS} 天）\n"
-        f"超阈值：{'是 —— 只提示，不判失效' if stale else '否'}"
-    )
-    request.node.add_report_section("setup", "登录态", detail)
-
-    if stale:
-        # 过期只告警：mtime 说明「存了多久」，说明不了「还有没有效」，
-        # 拿它判失效会造出假失败。真失效时下面的断言会红，那才是证据。
-        warnings.warn(
-            f"登录态已存放 {auth_state_age_days:.1f} 天，超过建议阈值 "
-            f"{settings.AUTH_STATE_TTL_DAYS} 天；若断言红，先重跑 scripts/setup_auth.py",
-            stacklevel=2,
-        )
-
+    """带 www 站登录态的独立 context，只给 `@pytest.mark.auth` 的用例用。"""
+    context = _build_auth_context(browser, auth_state, browser_context_args, request, "www")
     yield context
     context.close()
 
@@ -191,9 +219,56 @@ def auth_base_page(auth_page: Page) -> BasePage:
     """登录轨道的页面对象，指向 www.ctrip.com。
 
     用 hotel_base_url() 而不是 base_url()：登录入口在 www 顶部导航
-    （2026-11-01 用户截图确认），火车票站 trains.ctrip.com 的登录入口未取证。
+    （2026-11-01 用户截图确认）。火车票站是另一条轨道，见 auth_trains_base_page。
     """
     return BasePage(auth_page, base_url=settings.hotel_base_url())
+
+
+# ---- 火车票站登录态（2026-11-01 新增，两站登录态不互通）
+
+@pytest.fixture(scope="session")
+def auth_state_trains() -> Path:
+    """trains 站登录态文件，由 `setup_auth.py --entry trains` 单独采集。"""
+    return _require_auth_state("trains", "AUTH-03")
+
+
+@pytest.fixture
+def auth_trains_context(
+    browser: Browser,
+    auth_state_trains: Path,
+    browser_context_args: dict,
+    request: pytest.FixtureRequest,
+) -> BrowserContext:
+    """带火车票站登录态的独立 context。
+
+    与 auth_context 分开的理由不是洁癖：www 那份 state 打开 trains 站时，
+    顶部账号区是「登录 / 注册」，用它跑 trains 用例会稳定判未登录，
+    看起来像「退出功能坏了」或「state 失效」，实际只是拿错了文件。
+    """
+    context = _build_auth_context(
+        browser, auth_state_trains, browser_context_args, request, "trains"
+    )
+    yield context
+    context.close()
+
+
+@pytest.fixture
+def auth_trains_page(auth_trains_context: BrowserContext) -> Page:
+    page = auth_trains_context.new_page()
+    page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
+    yield page
+    page.close()
+
+
+@pytest.fixture
+def auth_trains_base_page(auth_trains_page: Page) -> BasePage:
+    """火车票站登录轨道的页面对象。
+
+    **无头下会被 WAF 拦**（K-05：整页只剩 `whaleguard block`，body 约 17 字符），
+    所以引用它的用例必须用 `blocked_guard()`：`open_and_check` 识别到拦截信号
+    会抛 BlockedByAntiBot，guard 转成 xfail 计入 blocked，而不是记成断言失败。
+    """
+    return BasePage(auth_trains_page, base_url=settings.base_url())
 
 
 @pytest.fixture

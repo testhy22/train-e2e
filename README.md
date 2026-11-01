@@ -236,8 +236,24 @@ verdict: YELLOW   触发: G5
      不提交订单、不进入支付流程。这两条轨道的全部断言都以「匿名访问」为前提。
    - **`auth` 轨**（`suites/auth`，marker `auth`，scope `ui_auth`）：用一份
      **人工扫码产生、绝不入库**的 storageState 验证「手上这份会话还能不能用」。
-     它不碰匿名轨的任何断言，也不进 CI —— 缺 `config/auth/ctrip_state.json` 时
-     固定 `skip("known-limit: AUTH-01 …")`，不进分母。
+     它不碰匿名轨的任何断言，也不进 CI —— 缺 state 时固定
+     `skip("known-limit: AUTH-01 / AUTH-03 …")`，不进分母。
+
+   **两站要各采一份**（2026-11-01 实测：登录态不互通）：
+
+   | 入口 | state 文件 | 采集命令 |
+   |---|---|---|
+   | `www.ctrip.com` | `config/auth/ctrip_state.json` | `python scripts/setup_auth.py` |
+   | `trains.ctrip.com` | `config/auth/ctrip_state_trains.json` | `python scripts/setup_auth.py --entry trains` |
+
+   用 www 那份打 trains 站会稳定判「未登录」，看起来像凭据失效，其实只是拿错了文件。
+
+   **退出用例默认不真点**：实测点一次「退出登录」会把服务端 `cticket` 一起注销，
+   同一份 state 重放即失效 —— 跑一次就要重扫一次码。所以
+   `test_account_menu_exposes_logout_entry` 只验证浮层与链接指向（不点、可反复跑）；
+   端到端注销要显式设 `AUTH_REAL_LOGOUT=1`，跑完脚本会把 state 改名成 `*.consumed`
+   避免下次莫名报「未登录」。详见 K-08。
+
    边界、缺口与取证状态见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) 的 K-07。
 6. **无头模式下火车票站点整站被拦（HTTP 432 `whaleguard block`）。** 只作用于
    `trains.ctrip.com`，酒店模块在无头下正常。CI 的 trains job 因此用 `xvfb-run -a` +

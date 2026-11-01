@@ -622,8 +622,37 @@ def _find_green_box(img) -> tuple[tuple[int, int, int, int] | None, int]:
     return (min(xs), min(ys), max(xs), max(ys)), len(xs)
 
 
-def auto_allow_wechat(before: set[int], outdir: Path, timeout_s: int = 15) -> tuple[bool, str]:
-    """在微信确认框上点【允许】。返回 (是否点了, 说明)。
+def _green_box_stable(img, tries: int = 6) -> tuple[tuple[int, int, int, int] | None, int]:
+    """反复取绿块，直到连续两次位置一致 —— 用「位置稳定」代替固定等待。
+
+    为什么需要（2026-11-01 失败现场）：微信确认框有淡入动画，窗口刚出现时
+    截到的是动画中间态，绿块位置还在移动。按那一刻算出的坐标点下去，
+    正好落在按钮外 —— 表现就是「点了但授权框还杵在那」，
+    而日志会写成「已点击」，看起来一切正常。
+    """
+    last = None
+    stable = 0
+    count = 0
+    for _ in range(tries):
+        box, count = _find_green_box(img)
+        if box is None:
+            time.sleep(0.25)
+            continue
+        if last is not None and box == last:
+            stable += 1
+            if stable >= 2:
+                return box, count
+        else:
+            stable = 0
+        last = box
+        time.sleep(0.25)
+    return last, count
+
+
+def auto_allow_wechat(
+    before: set[int], outdir: Path, timeout_s: int = 15, attempts: int = 3
+) -> tuple[bool, str]:
+    """在微信确认框上点【允许】。返回 (是否点成功, 说明)。
 
     为什么是像素而不是 UIA（2026-11-01 实测，两条都试过）：
         该窗口 `EnumChildWindows` 返回 0；`uiautomation` 连续 6 轮 `GetChildren()`
@@ -634,8 +663,13 @@ def auto_allow_wechat(before: set[int], outdir: Path, timeout_s: int = 15) -> tu
     按品牌绿 #07C160 找像素簇，再**先检查簇的尺寸合理**才点 ——
     实测按钮簇是 189×37，图标/噪点会明显偏小。
 
+    为什么点完要回读（2026-11-01 补）：首版点一次就 return True，
+    于是「点了没中」被记成成功，后续等扫码等到超时，日志看起来像站点问题。
+    现在每轮点完都验证确认框是否真的消失，没消失就**重新定位**再点
+    （窗口可能移动，不能复用上一轮坐标）。最多 attempts 轮，不做无限重试。
+
     风险边界：这是一次系统级鼠标点击，会短暂接管光标。点偏最坏结果是授权被拒、
-    重跑一次即可；本函数不做重试轰炸，也不在找不到可靠目标时硬点。
+    重跑一次即可；本函数在找不到可靠目标时不硬点。
     """
     try:
         from PIL import ImageGrab
@@ -659,44 +693,71 @@ def auto_allow_wechat(before: set[int], outdir: Path, timeout_s: int = 15) -> tu
         return False, f"{timeout_s}s 内没等到微信确认窗口，请人工点【允许】"
 
     print(f"  微信确认窗口：{target['w']}×{target['h']} at ({target['x']},{target['y']})")
-    time.sleep(0.8)  # 等窗口画完再截，否则拿到的是半张图
-
-    bbox = (target["x"], target["y"], target["x"] + target["w"], target["y"] + target["h"])
-    try:
-        img = ImageGrab.grab(bbox=bbox, all_screens=True)
-    except Exception as exc:
-        return False, f"截图失败：{exc}，请人工点【允许】"
+    time.sleep(0.5)  # 给淡入动画一点起步时间，稳定性靠下面的位置复核保证
 
     outdir.mkdir(parents=True, exist_ok=True)
-    try:
-        img.save(outdir / "09_wechat_confirm.png")
-    except Exception:
-        pass
 
-    box, count = _find_green_box(img)
-    if box is None:
-        return False, f"只找到 {count} 个绿色像素，无法定位按钮，请人工点【允许】"
+    for attempt in range(1, attempts + 1):
+        # 每轮都重新取窗口矩形：窗口可能被移动过，坐标不能跨轮复用
+        rect = wt.RECT()
+        try:
+            u.GetWindowRect(target["hwnd"], ctypes.byref(rect))
+            tx, ty = rect.left, rect.top
+            tw, th = rect.right - rect.left, rect.bottom - rect.top
+        except Exception:
+            tx, ty, tw, th = target["x"], target["y"], target["w"], target["h"]
 
-    x0, y0, x1, y1 = box
-    bw, bh = x1 - x0 + 1, y1 - y0 + 1
-    if not (60 <= bw <= target["w"] and 15 <= bh <= 90):
-        return False, f"绿块尺寸 {bw}×{bh} 不像按钮，拒绝盲点，请人工点【允许】"
+        bbox = (tx, ty, tx + tw, ty + th)
+        try:
+            img = ImageGrab.grab(bbox=bbox, all_screens=True)
+        except Exception as exc:
+            return False, f"截图失败：{exc}，请人工点【允许】"
 
-    cx = target["x"] + (x0 + x1) // 2
-    cy = target["y"] + (y0 + y1) // 2
-    print(f"  绿块 {bw}×{bh}，目标点 ({cx},{cy})")
+        try:
+            img.save(outdir / f"09_wechat_confirm_{attempt}.png")
+        except Exception:
+            pass
 
-    try:
-        u.SetForegroundWindow(target["hwnd"])
-    except Exception:
-        pass
-    time.sleep(0.4)
-    u.SetCursorPos(cx, cy)
-    time.sleep(0.15)
-    u.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
-    time.sleep(0.08)
-    u.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
-    return True, f"已按品牌绿定位并点击 ({cx},{cy})"
+        box, count = _green_box_stable(img)
+        if box is None:
+            return False, f"只找到 {count} 个绿色像素，无法定位按钮，请人工点【允许】"
+
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        if not (60 <= bw <= tw and 15 <= bh <= 90):
+            return False, f"绿块尺寸 {bw}×{bh} 不像按钮，拒绝盲点，请人工点【允许】"
+
+        cx = tx + (x0 + x1) // 2
+        cy = ty + (y0 + y1) // 2
+        print(f"  第 {attempt} 轮：绿块 {bw}×{bh}，目标点 ({cx},{cy})")
+
+        try:
+            u.SetForegroundWindow(target["hwnd"])
+        except Exception:
+            pass
+        # 先进窗口中心再移到按钮：Qt 需要一次 pointerenter 才把窗口当作「鼠标在内」，
+        # 直接从窗口外跳到按钮上，个别版本会丢掉这次 click。
+        u.SetCursorPos(tx + tw // 2, ty + th // 2)
+        time.sleep(0.15)
+        u.SetCursorPos(cx, cy)
+        time.sleep(0.2)
+        u.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+        time.sleep(0.08)
+        u.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+
+        # 回读：确认框消失才算点中。IsWindow 为 0 或已不可见都算。
+        settled = False
+        for _ in range(10):
+            time.sleep(0.3)
+            if not u.IsWindow(target["hwnd"]) or not u.IsWindowVisible(target["hwnd"]):
+                settled = True
+                break
+        if settled:
+            return True, f"已按品牌绿定位并点击 ({cx},{cy})，确认框已关闭（第 {attempt} 轮）"
+
+        print("    点击后确认框仍在 —— 重新定位再试")
+
+    return False, f"连续 {attempts} 轮点击后确认框仍未关闭，请人工点【允许】"
 
 
 def click_fast_login(auth_page: Page, outdir: Path, auto_allow: bool = True) -> bool:
@@ -880,7 +941,7 @@ def launch_browser(pw, *, force_chromium: bool = False):
     也不碰日常浏览数据（Playwright 为它开的是临时 profile）。
     拿不到快捷登录时自动退化为二维码路径，功能不受影响。
     """
-    args: dict = {"headless": False}
+    args: dict = {"headless": False, "args": list(settings.BROWSER_UI_ARGS)}
 
     if not force_chromium:
         try:
@@ -940,7 +1001,7 @@ def main() -> int:
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     outdir = Path(args.out) if args.out else settings.REPORTS_DIR / "probe_auth" / stamp
-    state_path = settings.auth_state_path()
+    state_path = settings.auth_state_path(args.entry)
 
     print("=" * 68)
     print("携程登录态采集（人工扫码）")

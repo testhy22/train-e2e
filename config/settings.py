@@ -62,6 +62,7 @@ NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "30000"))
 
 # 登录态文件。文件存在 ≠ 已登录；内容是否还有效只有真跑一次才知道。
 AUTH_STATE_FILE = PROJECT_ROOT / "config" / "auth" / "ctrip_state.json"
+AUTH_STATE_DIR = AUTH_STATE_FILE.parent
 
 # 「建议重扫」阈值（天）。超阈值只告警、不阻断：mtime 只能说明「存了多久」，
 # 说明不了「还有没有效」，拿它判失效会造出假失败。
@@ -80,13 +81,20 @@ AUTH_GLOBAL = os.getenv("AUTH_GLOBAL", "").strip() == "1"
 OVERLAY_AUTOCLOSE = os.getenv("OVERLAY_AUTOCLOSE", "1").strip() != "0"
 
 
-def auth_state_path() -> Path:
-    """登录态文件路径。
+def auth_state_path(entry: str = "www") -> Path:
+    """登录态文件路径。按入口站分文件，**不同站各存一份**。
 
-    只返回路径，**不判断存在性** —— 存在性判定归 conftest 的 auth_state 夹具，
-    那里要负责「缺文件时 skip 而不是 fail」（否则 CI 永久红）。
+    为什么要分（2026-11-01 实测）：www.ctrip.com 登录后，用同一份 state 打开
+    trains.ctrip.com 仍判未登录 —— 两站登录态不互通。若两站共用一份文件，
+    跑 `--entry trains` 会把刚采好的 www 会话**覆盖掉**，而且覆盖后不会报错，
+    只会在下次跑 auth 用例时莫名其妙地判「未登录」。
+
+    www 沿用 `ctrip_state.json` 原名：现有文件、README 与历史报告都指向它，
+    为分文件而改名会让旧记录全部指向不存在的路径。
     """
-    return AUTH_STATE_FILE
+    if entry == "www":
+        return AUTH_STATE_FILE
+    return AUTH_STATE_DIR / f"ctrip_state_{entry}.json"
 
 
 # ---------------------------------------------------------------- 浏览器
@@ -95,6 +103,35 @@ HEADLESS = os.getenv("HEADED") != "1"
 VIEWPORT = {"width": 1920, "height": 1080}
 LOCALE = "zh-CN"
 TIMEZONE_ID = "Asia/Shanghai"
+
+# 浏览器**自带 UI** 的关闭项。2026-11-01 用户在截图里指出两处弹层会挡住页面：
+#   1. 「www.ctrip.com 想要获取您的位置」原生权限气泡 —— 挡住右上角账号区，
+#      恰好压在 hover 用户名那个位置；
+#   2. 「英语 / 中文（简体）→ Google Translate」翻译气泡 —— 同样压在右上角。
+#
+# 两者的处理方式不同，别混为一谈：
+#   · 权限气泡由 `permissions=[]` 处理（实测四项探针全为 denied，见下方注释）；
+#   · 翻译气泡是 Chrome **内置功能**，不受 permissions 影响，只能靠启动参数关。
+#
+# 这组参数**不是**反检测：不碰 UA、不碰 navigator.webdriver、不注入脚本、
+# 不改指纹。它们只关掉浏览器自己的浮层 —— 与 `permissions=[]` 同一性质
+# （都是「让浏览器别插嘴」，而不是「让站点认不出我们」）。
+# 项目红线见 pages/base_page.py 文件头，这条边界不能跨。
+BROWSER_UI_ARGS = (
+    "--no-first-run",                     # 首次运行引导
+    "--no-default-browser-check",         # 默认浏览器询问
+    "--disable-save-password-bubble",     # 保存密码气泡（挡住页面右下）
+    "--disable-search-engine-choice-screen",  # 搜索引擎选择页（会整页劫持）
+    # 翻译条：截图里的「英语 / 中文（简体）」就是它。TranslateUI 是旧名，两个都列。
+    "--disable-features=Translate,TranslateUI",
+)
+
+# 实测记录（2026-11-01，/tmp 探针跑 navigator.permissions.query + 三组对照）：
+#   permissions=[]                    → geolocation/notifications/camera/microphone 全 denied
+#   permissions=["local-network-access"] → 同样全 denied（Playwright 语义是**替换**，不是追加）
+#   不传 permissions                  → geolocation=denied，其余三项 = prompt
+# 所以「位置权限气泡」只在**不传 permissions** 时才会弹。conftest 与 setup_auth
+# 两处都必须显式传，任何一处漏了就会看到那个气泡。
 
 # 失败即证据：只在失败时保留 trace。理由见 PROJECT-PLAN 5.D2——
 # on-first-retry 需要重试才会产出 trace，而本项目不引入重试插件。

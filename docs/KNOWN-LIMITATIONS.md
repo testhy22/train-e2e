@@ -88,10 +88,29 @@
 | 起因 | 2026-11-01 裁决变更：「立即推进微信快捷登录」的自动化。README 此前写的是「登录态一律不碰」，本条登记这次变更的边界，不是把旧结论悄悄改掉 |
 | 已实现 | `scripts/setup_auth.py`（人工扫码一次，存 `config/auth/ctrip_state.json`）+ `suites/auth`（3 条用例，marker `auth`、scope `ui_auth`）+ `utils/auth.py`（采集与验证共用同一份判据，避免两处漂移） |
 | 能证明什么 | 「这份会话还能用」：加载 state 后访问 www.ctrip.com，顶部「注册」消失、头像区可见。这是**唯一**有画面证据的判据 |
-| **不能**证明什么 | ① 登录流程本身（输账号 / 验证码 / 扫码成功）一次都没跑过；② 微信授权页的任何 DOM —— 本项目**没有任何一次实测取证**，外部方案里 `get_by_role("button", name="允许")`、`a[class*='weixin']` 之类全部标 `⚠️[未查实]`；③ `trains.ctrip.com` 与 `www.ctrip.com` 登录态是否互通，未查实 |
+| **不能**证明什么 | ① 输账号密码 / 图形验证码那条路径一次都没跑过（只走了微信快捷登录）；② 手机扫码确认路径在取证后没有再做端到端验证（本轮走的是 PC 快捷登录，确认动作在微信客户端） |
+| 已取证（2026-11-01 补，原先的 `⚠️[未查实]` 全部清掉） | 登录入口：`a.icon-new-wechat`（文本「微信」）。**协议勾选是前置闸门**：不勾 `input#checkboxAgreementInput` 就点微信，只弹 `div[data-testid="agreementTip"]`「请先阅读并勾选协议」，URL 停在 passport，看起来像「点了没反应」。授权页 `open.weixin.qq.com/connect/qrconnect`，两种形态：快捷登录面板 `div.js_quick_login`（178×179，含头像昵称 + `button.js_quick_login_btn`），或二维码 `img.js_qrcode_img`（160×160）。**该页没有「允许」按钮** —— 确认框在微信客户端的 Qt 窗口里（`EnumChildWindows` 返回 0，`uiautomation` 6 轮 `GetChildren()` 也是 0，只能按品牌绿 `#07C160` 像素定位后点击，实测按钮簇 189×37） |
+| 已实测：必须用系统 Chrome | 同一台机器、同一 URL、同一套代码，只换浏览器二进制：系统 Chrome `156.0.8078.79` 快捷登录 0.1s 出现；Playwright Chromium `156.0.8078.4` 永远 `display:none`。差异在网络层（微信页面 POST 六个回环端口 `/api/check-login`，Playwright 里 `14013` 报 `ERR_CONNECTION_CLOSED`，而 `curl -k` 直连返回 200），**不是指纹** —— 所以没有引入任何 stealth / UA 伪装 |
+| 已实测：两站不互通 | www 登录后用同一份 state 打开 `trains.ctrip.com` 仍判未登录 ⇒ 各采一份（`--entry trains` → `ctrip_state_trains.json`）。误用对方那份不会报错，只会稳定判「未登录」，详见 README 第 5 条 |
 | 与匿名轨的隔离 | 三条硬隔离：scope 独立（`ui_auth`，不并入 ui / ui_hotels 的 ratio 序列）；context 独立（匿名用例仍匿名，K-04 的「提交路径落 passport」实验条件不被改）；缺文件时 `skip("known-limit: AUTH-01 …")` 而非 fail（不进分母，不让 CI 永久红） |
 | 凭据边界 | state 是**明文会话 cookie**，等价账号凭据。`config/auth/` 已进 `.gitignore`；不进 CI、不进 secret；不因被拦而换账号重试。谁要把 state 放进 CI secret，等于同时推翻 K-04「CI 无法安全持有凭据」的判断，必须重新裁决 |
 | 已实测的坑① | 首页底部「周周享低价 / 领券更划算」浮层带一张**营销二维码**（2026-11-01 截图证据），会让「二维码可见」类断言假绿。`utils/overlay.py` 已在 `BasePage.goto` 后自动关它，`OVERLAY_AUTOCLOSE=0` 可关 |
 | 已实测的坑② | 按窗口标题「微信」判断 PC 微信会**误命中**：同一次 `EnumWindows` 里 Chrome 窗口标题也含「微信」。`utils/wechat.py` 改用类名 `Qt51514QWindowIcon` 作主判据，标题只做弱兜底 |
 | 未完成 | `test_submit_then_list_renders`（`suites/hotels`）仍是 `skip`。它有登录态后**可能**可以启用，但「带 state 跑酒店提交路径是否还落 passport」这次没验证，别默认它能绿 |
 | 销号条件 | 不需要销号：这是新增能力，不是限制。真要退场，删 `suites/auth` + `scripts/setup_auth.py` + `config/settings.py` 的「登录态」段即可，其余代码不依赖它 |
+
+---
+
+## K-08 真实退出会作废本机登录态（退出用例因此默认不真点）
+
+| 项 | 内容 |
+|---|---|
+| 起因 | 2026-11-01 补「退出」形成鉴权闭环时发现：点一次「退出登录」，凭据就被消耗掉，这不是用例写错，是站点行为 |
+| 实测证据（工具） | `tools/probes/probe_logout_effect.py`：阶段 A 加载 state → 确认已登录 → 点退出 → 判定未登录；阶段 B 用**同一份 state 文件**新开 context 重放 → 判定「未登录」 |
+| 实测证据（cookie） | 退出前 ctrip 域登录相关：`AHeadUserInfo`、`DUID`、`IsNonUser`、`cticket`、`login_type`、`login_uid`、`suid`；退出后只剩 `GUID`、`_RGUID`、`_abtest_userid`、`suid` |
+| 关键澄清 | **文件本身没被改写**（脚本从不写回 state），但文件里的 `cticket` 已作废。「母版只读所以副本用完即弃、母版安全」这个推理漏了一环：**cookie 的有效性不在文件里，在服务端**。所以「每次退出都开新副本」并不能保护母版 |
+| 退出机制（实测） | 退出入口是普通链接：`a[class*='logout']`，`href=https://passport.ctrip.com/user/logout`，`onclick` 为空。整套动作就是导航到该 URL，由**服务端 302 + Set-Cookie** 清除。退出后 75 条请求里只有这一条带注销语义 |
+| 推论：mock 不可行 | 任何「拦截注销请求、返回假响应」的 mock 都测不出退出：浏览器收不到 Set-Cookie，cookie 一条不少，页面仍是登录态。要让它变绿只能自己伪造 Set-Cookie，那验证的是我们写的假响应，不是携程的退出 |
+| 浮层是懒渲染 | 悬停**前**扫全文档，与「退出」相关的节点数 = **0**，`body.innerText` 也不含「退出」；悬停后才出现。所以顺序只能是「先 hover，再找元素」，反过来会稳定超时并被误判成「站点没有退出功能」 |
+| 落地做法 | ① `test_account_menu_exposes_logout_entry`（默认跑）：只 hover 展开、断言入口可见 + `href` 指向注销端点，**不点击**，可反复跑、可进 CI；② `test_real_logout_revokes_session`（`AUTH_REAL_LOGOUT=1` 才跑）：真实退出，跑完把 state 改名成 `*.consumed` —— 不改名的话文件看着还在，下次登录用例会红在「未检测到已登录态」，而没人会想到是它干的 |
+| 每跑一次真退出 | 要重采一次：`python scripts/setup_auth.py --entry www`（或 `--entry trains`）。这一步无法自动化进 CI：需要本机登录的 PC 微信 + 有头桌面 |
