@@ -198,3 +198,11 @@ ctrip-train-e2e/
 4. 容器化的目标是"CI 环境一致"还是"本地也能一键起"？两者 Dockerfile 设计不同。
 5. 是否需要把三个测试项目（price-pipeline / train-batch / train-e2e）的公共规范抽成共享包？
    抽的话按 git submodule 还是 pip 私有包？
+
+---
+
+> **注记（2026-11-01 追加，正文未改）**
+> 本文提到的 `test_data/` 目录已在提交 `113d30a` 删除。数据现在位于
+> `data/trains/smoke_cases.yaml` 与 `data/hotels/search_cases.yaml`（`version: 1` + `cases` 包装，
+> 统一入口 `utils/case_data.py`，可用 `CASE_DATA_DIR` 指向别的目录）。
+> 正文按迁移前的原貌保留，作为当时决策的记录；现状以代码为准。

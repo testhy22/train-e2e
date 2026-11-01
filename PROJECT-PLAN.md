@@ -152,3 +152,11 @@ C 我不做，理由和上一轮一致：OTA 的用户协议禁止自动化访�
 
 选 A 的话，同样的结构、同样的验收标准、同样的 trace 与截图，全部可在本机与 CI 复现；
 将来真要接你自己的站或内部系统，只改 `config/settings.py` 里的 BASE_URL 和 `pages/` 下的定位器。
+
+---
+
+> **注记（2026-11-01 追加，正文未改）**
+> 本文提到的 `test_data/` 目录已在提交 `113d30a` 删除。数据现在位于
+> `data/trains/smoke_cases.yaml` 与 `data/hotels/search_cases.yaml`（`version: 1` + `cases` 包装，
+> 统一入口 `utils/case_data.py`，可用 `CASE_DATA_DIR` 指向别的目录）。
+> 正文按迁移前的原貌保留，作为当时决策的记录；现状以代码为准。
