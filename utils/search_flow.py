@@ -32,6 +32,7 @@ from typing import Any
 from pages.flight_search_page import FlightSearchPage
 from pages.hotel_search_page import HotelSearchPage
 from pages.train_search_page import TrainSearchPage
+from utils import allure_support
 
 
 @dataclass
@@ -70,15 +71,22 @@ def search_hotel(page, case) -> SearchOutcome:
     )
     try:
         hotel = HotelSearchPage(page)
-        hotel.open()
-        hotel.set_destination(case.city)
-        hotel.set_checkin(case.checkin)
-        hotel.set_checkout(case.checkout)
-        hotel.close_calendar()
-        hotel.set_rooms(case.rooms, case.adults, case.children)
-        out.params = hotel.submit_and_capture()
-        out.landed = hotel.wait_result_list()
-        out.cards = hotel.result_card_count()
+        with allure_support.step("打开酒店首页并检查风控"):
+            hotel.open()
+        with allure_support.step("填目的地（点选联想面板）"):
+            hotel.set_destination(case.city)
+        with allure_support.step(f"选日期 {case.checkin} → {case.checkout}"):
+            hotel.set_checkin(case.checkin)
+            hotel.set_checkout(case.checkout)
+            hotel.close_calendar()
+        with allure_support.step(
+            f"设置房间住客 {case.rooms}间/{case.adults}成人/{case.children}儿童"
+        ):
+            hotel.set_rooms(case.rooms, case.adults, case.children)
+        with allure_support.step("提交并等待结果列表"):
+            out.params = hotel.submit_and_capture()
+            out.landed = hotel.wait_result_list()
+            out.cards = hotel.result_card_count()
         out.url = hotel.current_url
     except Exception as exc:                      # noqa: BLE001 - 见文件头「为什么不抛」
         out.error = f"{type(exc).__name__}: {exc}"
@@ -93,14 +101,18 @@ def search_train(page, case) -> SearchOutcome:
     )
     try:
         train = TrainSearchPage(page)
-        train.open()
-        train.select_city("depart", case.from_city)
-        train.select_city("arrive", case.to_city)
-        train.select_date(case.depart_date)
-        train.submit()
-        out.landed = bool(train.url_depart_date())
-        out.params = {"dDate": train.url_depart_date()}
-        out.cards = len(train.result_texts())
+        with allure_support.step("打开火车票首页并检查风控"):
+            train.open()
+        with allure_support.step(f"选区间 {case.from_city} → {case.to_city}"):
+            train.select_city("depart", case.from_city)
+            train.select_city("arrive", case.to_city)
+        with allure_support.step(f"选出发日 {case.depart_date}"):
+            train.select_date(case.depart_date)
+        with allure_support.step("提交并读取车次"):
+            train.submit()
+            out.landed = bool(train.url_depart_date())
+            out.params = {"dDate": train.url_depart_date()}
+            out.cards = len(train.result_texts())
         out.url = page.url
     except Exception as exc:                      # noqa: BLE001
         out.error = f"{type(exc).__name__}: {exc}"
@@ -115,22 +127,26 @@ def search_flight(page, case) -> SearchOutcome:
     )
     try:
         flight = FlightSearchPage(page)
-        flight.open()
-        flight.choose_one_way()
-        flight.set_route(case.from_city, case.to_city)
+        with allure_support.step("打开机票首页并切单程"):
+            flight.open()
+            flight.choose_one_way()
+        with allure_support.step(f"选航线 {case.from_city} → {case.to_city}"):
+            flight.set_route(case.from_city, case.to_city)
         # select_date 内部会翻月、按「年+月」定位月份块、点日、关日历，
         # 并在收尾后断言 input 真的变成了目标日期 —— 失败会抛异常带着原因，
         # 不再是「日期没生效但照样提交」那种看起来像站点改版的假失败。
-        flight.select_date(case.depart)
-        # 兜一次：万一 select_date 走到一半抛了，日历留在页面上会拦住搜索按钮。
-        flight.close_calendar()
-        out.landed = flight.submit_and_wait()
-        out.params = flight.query_params()
-        out.url = flight.current_url
-        out.cards = flight.result_card_count()
-        if out.cards == 0 and out.landed:
-            flight.wait_result_cards()
+        with allure_support.step(f"选乘机日 {case.depart}（含跨月翻页）"):
+            flight.select_date(case.depart)
+            # 兜一次：万一 select_date 走到一半抛了，日历留在页面上会拦住搜索按钮。
+            flight.close_calendar()
+        with allure_support.step("提交并等待航班列表"):
+            out.landed = flight.submit_and_wait()
+            out.params = flight.query_params()
             out.cards = flight.result_card_count()
+            if out.cards == 0 and out.landed:
+                flight.wait_result_cards()
+                out.cards = flight.result_card_count()
+        out.url = flight.current_url
         if flight.route_in_url():
             out.params = {**out.params, "route": flight.route_in_url()}
     except Exception as exc:                      # noqa: BLE001

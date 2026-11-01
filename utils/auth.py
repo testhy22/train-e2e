@@ -28,7 +28,10 @@ header 才被 JS 换成用户名，这段时间里「注册」还在。页面刚
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
+from typing import Any
 
 from playwright.sync_api import Page
 
@@ -196,3 +199,62 @@ def state_summary(data: dict) -> str:
             "这是站点下发的 cookie 生命周期，不要靠改脚本来绕。"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 跨站合并（2026-11-01）
+
+# 只有火车票那份 state 才有的域。合并时它们必须保留，否则 trains 站回到未登录。
+TRAINS_ONLY_DOMAINS: frozenset[str] = frozenset({"trains.ctrip.com", ".trains.ctrip.com"})
+
+
+def _dedupe_cookies(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 (name, domain, path) 去重，**后者覆盖前者**。
+
+    Playwright 的 `add_cookies` 对同键 cookie 是「后写生效」，这里先去重，
+    是为了让「谁打底、谁补充」这件事在代码里可读，而不是靠调用顺序的副作用。
+    """
+    merged: dict[tuple, dict[str, Any]] = {}
+    for cookie in cookies:
+        key = (cookie.get("name"), cookie.get("domain"), cookie.get("path"))
+        merged[key] = cookie
+    return list(merged.values())
+
+
+def merged_storage_state(primary: Path, extra: Path | None = None) -> dict[str, Any]:
+    """把两个入口站的 state 合成一份，让**一个 context 同时登录 www / flights / trains**。
+
+    背景（K-07 实测）：两站登录态不互通 —— 用 www 那份打开 trains 站，顶部仍是
+    「登录/注册」。所以「一次登录跑完三站」不能只加载一份 state。
+
+    策略（2026-11-01 探针 `tools/probes/probe_merged_auth.py` 三选一实测）：
+      A  www 打底 + trains 的专属域（`trains.ctrip.com` / `.trains.ctrip.com`）  → 3/3
+      B  trains 打底 + www 的 passport 域                                        → 3/3
+      C  trains 全量                                                             → 3/3
+    三者都能让三站判登录（`.ctrip.com` 上的主会话被两站共用，同一个账号）。
+    选 A 的理由不是结果更好，而是**语义最不容易漂**：www 是主入口，它的
+    `.ctrip.com` 会话是权威值；trains 只补自己独有的域，不去覆盖主会话。
+    以后若某站的会话开始分叉，A 的失效方式最容易看懂（trains 掉登录，而不是
+    某几个 .ctrip.com cookie 被静默替换）。
+
+    `extra` 缺失时退回单份 state，并在返回值里标 `_merged=False`，由调用方决定怎么提示。
+    """
+    primary_state = json.loads(primary.read_text(encoding="utf-8"))
+    cookies: list[dict[str, Any]] = list(primary_state.get("cookies") or [])
+    origins: list[dict[str, Any]] = list(primary_state.get("origins") or [])
+    merged_flag = False
+
+    if extra is not None and extra.exists() and extra != primary:
+        extra_state = json.loads(extra.read_text(encoding="utf-8"))
+        extra_cookies = [
+            c for c in (extra_state.get("cookies") or [])
+            if c.get("domain") in TRAINS_ONLY_DOMAINS
+        ]
+        if extra_cookies:
+            cookies = _dedupe_cookies(cookies + extra_cookies)
+            # origins 只取主 state 的：localStorage 无跨域合并的语义，
+            # 把两站的 origin 拼在一起会让「这个 key 是从哪来的」失去依据。
+            merged_flag = True
+
+    state = {"cookies": cookies, "origins": origins}
+    state["_merged"] = merged_flag           # 仅用于日志，Playwright 不认这个键
+    return state

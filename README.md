@@ -329,3 +329,45 @@ E2E_CLEAN_DISABLE=1 python -m pytest   # 完全跳过（要留证据排查时）
 `PermissionError`（Windows 下被 Trace Viewer 占用）跳过并计数；
 `logs/`、`screenshots/`、`trace/`、`html/` 这四个一级目录即使清空也不删。
 行为由 `tools/tests/test_cleaner.py` 锁死（12 条：过期判定 / 演练 / 禁用 / 项目外拒绝 / 脱敏）。
+
+## 十一、Allure 报告（项目级看板）
+
+pytest-html 只够单次结果展示：扁平列表、没有步骤、没有历史。Allure 补的正是这三块。
+
+```bash
+# 跑一次（pytest.ini 的 addopts 已带 --alluredir，不需要额外参数）
+python -m pytest tools/tests suites/e2e -p no:randomly
+
+# 生成报告（会自动续上一份的 history，再出两份产物）
+python scripts/allure_report.py            # 多文件 → reports/allure-report/
+python scripts/allure_report.py --open     # 顺手打开单文件那份
+python scripts/allure_report.py --serve    # 起本地服务看（趋势可交互）
+```
+
+**两份产物，各有用途，别只留一份**：
+
+| 产物 | 怎么看 | 为什么需要 |
+|---|---|---|
+| `reports/allure-report/index.html` | **必须走 HTTP**（`--serve` 或任意静态服务器） | `history/` 落在这里，趋势图靠它续接 |
+| `reports/allure-report-single/index.html` | 双击即可（3.9 MB） | 多文件版用 `file://` 打开会显示 `500 Failed to fetch`（见 K-10 坑②） |
+
+报告里能看到什么：
+
+- **Behaviors**：Epic（携程网页自动化测试）→ Feature（酒店搜索 / 跨模块串联 / 数据层自检）→ Story → 用例；
+  标签由 `conftest._allure_labels` 按 scope 自动打，新用例自动继承，不需要逐个加装饰器。
+- **Steps**：三个搜索流程各自拆成 4~5 步（打开首页 → 填目的地 → 选日期 → 填住客 → 提交），
+  失败时红在具体那一步上，不用再翻日志找「卡在哪」。
+- **失败证据**：视口截图（内嵌）、页面诊断文本（JS 报错 / 4xx / 请求失败）、Playwright trace（`E2E_TRACE=1` 时）。
+- **Environment**：base_url ×3、headless、Python / Playwright 版本、是否续上历史 —— 每份报告自证环境。
+- **Categories**：失败自动归到「对方拦截 / 脚本问题 / 断言不符 / 环境或数据问题」四类。
+
+依赖与工具（本机已装，位置可用环境变量覆盖）：
+
+```
+allure-pytest==2.16.2            # 主依赖，必须 ≥2.16（2.9.x 与 pytest 9 不兼容，K-10 坑①）
+JAVA_HOME   = G:/Program Files\jre-17.0.20.1\jdk-17.0.20.1+1-jre
+ALLURE_BIN  = G:/Program Files\allure-2.46.1\allure-2.46.1\bin\allure.bat
+```
+
+下载这类二进制资产请走 `tools/smart_download.py`（多源测速 + 按体积自适应超时 + 哈希校验），
+别用单一公共代理硬等 —— `gh-proxy.com` 实测会「HTTP 200 但只给 1.58 MB」，规则见 `AGENTS.md`。

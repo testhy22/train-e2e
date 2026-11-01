@@ -26,7 +26,10 @@ from playwright.sync_api import Browser, BrowserContext, Page
 from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
 from pages.train_search_page import WidgetUnavailable
+from utils import allure_support
+from utils.auth import merged_storage_state
 from utils.cleaner import clean_old_reports
+from utils.waf import check_waf_block as _check_waf_block
 from utils.diagnostics import diagnostics_of, forget_page, instrument_page
 from utils.logger import get_logger, log_file_path
 
@@ -51,6 +54,28 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     state = settings.auth_state_path()
     log.info("登录态：%s（%s）", "存在" if state.exists() else "缺失",
              state.name if state.exists() else "登录态轨道将 skip")
+    # Allure：续历史 → 写环境信息 → 写失败分类。
+    # 顺序不能反：续历史必须先于本次写入，否则新结果会先落到目录里，
+    # generate 时就分不清哪些是上一轮的 history。
+    # **整段包 try**：这是在 sessionstart 里跑的，一旦抛异常 pytest 会以
+    # INTERNALERROR 整体崩掉（2026-11-01 真发生过一次：playwright 没有 __version__）。
+    # 报告能力不该有权限让测试跑不起来。
+    try:
+        if allure_support.enabled():
+            resumed = allure_support.build_history()
+            env = allure_support.write_environment({"HistoryResumed": str(resumed)})
+            cats = allure_support.write_categories()
+            log.info(
+                "Allure：结果目录 %s｜历史续接=%s｜environment=%s｜categories=%s",
+                settings.ALLURE_RESULTS,
+                "是" if resumed else "否（首次运行，趋势图从本次开始）",
+                env.name if env else "(未写)",
+                cats.name if cats else "(未写)",
+            )
+        else:
+            log.info("Allure：未安装 allure-pytest，本次不产 Allure 结果（不影响用例）")
+    except Exception as exc:                      # noqa: BLE001
+        log.warning("Allure 初始化失败（已忽略，不影响用例）：%s", exc)
     # 清理失败不允许影响会话：cleaner 自己吞掉了所有异常，这里再加一层保险。
     try:
         clean_old_reports()
@@ -95,6 +120,55 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         else:
             scope = "unit"
         item.user_properties.append(("scope", scope))
+
+
+# ---------------------------------------------------------------- Allure 标签
+
+# scope → 报告里的业务模块名。键与 `pytest_collection_modifyitems` 算出的 scope 一致。
+_FEATURE_BY_SCOPE = {
+    "ui_e2e": "跨模块串联（登录态三站）",
+    "ui_auth": "登录态搜索",
+    "ui_hotels": "酒店搜索",
+    "ui": "火车票与第三方站点",
+    "unit": "数据层与门禁自检",
+}
+
+
+@pytest.fixture(autouse=True)
+def _allure_labels(request: pytest.FixtureRequest) -> None:
+    """给每条用例统一打 epic/feature，让报告按业务模块分层。
+
+    为什么用 autouse fixture 而不是逐文件装饰器：见 `utils/allure_support.label`
+    的说明 —— 口径集中在 scope 一处，新用例自动继承，不会出现「加了一半」。
+    装饰器只在需要更细的 story/title 时才补。
+    """
+    if not allure_support.enabled():
+        return
+    marker_names = {m.name for m in request.node.iter_markers()}
+    if "e2e" in marker_names:
+        scope = "ui_e2e"
+    elif "auth" in marker_names:
+        scope = "ui_auth"
+    elif "hotels" in marker_names:
+        scope = "ui_hotels"
+    elif "ui" in marker_names:
+        scope = "ui"
+    else:
+        scope = "unit"
+    # story 必须有默认值（2026-11-01 实测）：Allure 的 Behaviors 树是
+    # epic → feature → story 三层，只到 feature 的用例**不会进树** ——
+    # 首轮 125 条里只有 2 条出现在 Behaviors 页，其余全丢。
+    # 默认 story 取用例所在模块名；带 e2e 标记的用例已有 @allure.story 装饰器，
+    # 这里**必须让位**，否则会多出一层 module 名的多余节点（同一用例两个 story）。
+    story = None if scope == "ui_e2e" else getattr(
+        getattr(request.node, "parent", None), "name", "未分组"
+    )
+    allure_support.label(
+        epic="携程网页自动化测试",
+        feature=_FEATURE_BY_SCOPE.get(scope, scope),
+        story=story,
+        severity="CRITICAL" if scope == "ui_e2e" else "NORMAL",
+    )
 
 
 # ---------------------------------------------------------------- 浏览器上下文
@@ -387,6 +461,12 @@ class SharedSession:
 def shared_context(browser: Browser) -> BrowserContext:
     """session 级登录态 context。缺 state 时整条轨道 skip（AUTH-06，不进分母）。
 
+    **三站一次性登录**（2026-11-01 用户要求「只登录一次、每个功能不重启浏览器」）：
+    这里加载的是**合并后的** state —— www 打底，再补火车票那份里的
+    `trains.ctrip.com` 专属 cookie。只加载 www 那份的后果是实测过的：飞机票、
+    酒店绿，火车票整站回到「登录/注册」（K-07 两站不互通）。
+    合并策略与三选一的实测对照见 `utils/auth.merged_storage_state`。
+
     Trace 说明：pytest-playwright 的 `--tracing=retain-on-failure` 只作用于它自己
     造的函数级 context，**管不到这个手搓的 session context**，所以 e2e 轨默认没有
     trace。要录就设 `E2E_TRACE=1`，失败时存到 `reports/trace/<用例>.zip`。
@@ -394,7 +474,17 @@ def shared_context(browser: Browser) -> BrowserContext:
     而 e2e 的失败现场已有截图 + DOM + 4xx 清单（见 `_report_diagnostics`）。
     """
     state = _require_auth_state("www", "AUTH-06")
-    context = browser.new_context(**{**_common_context_args(), "storage_state": str(state)})
+    trains_state = settings.auth_state_path("trains")
+    merged = merged_storage_state(state, trains_state)
+    was_merged = bool(merged.pop("_merged", False))
+    get_logger().info(
+        "共享会话登录态：%s + %s ⇒ cookies=%d（跨站合并=%s）",
+        state.name,
+        trains_state.name if was_merged else "(缺失，火车票将未登录)",
+        len(merged["cookies"]),
+        "是" if was_merged else "否",
+    )
+    context = browser.new_context(**{**_common_context_args(), "storage_state": merged})
     if os.getenv("E2E_TRACE") == "1":
         try:
             context.tracing.start(screenshots=True, snapshots=True, sources=False)
@@ -440,14 +530,13 @@ def shared_page(shared_session: SharedSession, request: pytest.FixtureRequest) -
 def check_waf_block(page: Page) -> BlockSignal | None:
     """用户需求里点名的守卫：命中风控返回信号，未命中返回 None。
 
-    **复用 `BasePage.detect_block()`，不另写一套判据。** 两套判据的后果很具体：
-    守卫说「是 WAF」、用例说「断言失败」，然后没人知道该信哪个。
-
-    与「登录墙」不是一回事，别混：
-      · `passport.ctrip.com` = 要求登录，属业务门槛（`looks_like_login_wall`）；
-      · 风控域 / 滑块 / `whaleguard` = 对方拒绝访问，属 blocked（本函数 + BLOCK_HOST_PATTERNS）。
+    **实现已搬到 `utils/waf.py`**（2026-11-01）：这里只保留同名转发，因为既有用例
+    仍写 `from conftest import check_waf_block`。搬家的原因是实测的 import 顺序耦合：
+    `tools/tests` 与 `suites` 一起收集时，`conftest` 会被先导入的那个占用，
+    报 `ImportError: cannot import name 'check_waf_block' from 'conftest'`。
+    新代码请直接 `from utils.waf import check_waf_block`。
     """
-    return BasePage(page).detect_block()
+    return _check_waf_block(page)
 
 
 @pytest.fixture
@@ -600,6 +689,10 @@ def _report_failure_scene(
             f"url：{url}\ntitle：{title}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
         )
     )
+    # Allure 侧同时挂：视口图（报告内直接看）+ 现场文本。整页图仍只在磁盘上，
+    # 避免报告体积翻倍（见 utils/allure_support.attach_screenshot 的说明）。
+    allure_support.attach_screenshot(target, name="失败现场（视口）")
+    allure_support.attach_text("失败现场", f"url：{url}\ntitle：{title}")
     get_logger().error("失败现场｜url=%s｜title=%s｜截图=%s", url, title, paths or "(截图失败)")
 
 
@@ -634,6 +727,11 @@ def _report_diagnostics(item: pytest.Item, report: pytest.TestReport) -> None:
         chunks.append(f"trace：{trace_path}")
 
     report.sections.append(("页面诊断", "\n\n".join(chunks)))
+    # Allure 侧：诊断文本 + trace 文件（trace 在 Allure 里是个可下载附件，
+    # 用 trace.playwright.dev 打开就能逐帧回放网络与 DOM）。
+    allure_support.attach_text("页面诊断", "\n\n".join(chunks))
+    if trace_path:
+        allure_support.attach_file(trace_path, name="Playwright trace", mime="application/zip")
     log.error("用例失败：%s", item.nodeid)
     for chunk in chunks:
         log.error("%s", chunk)

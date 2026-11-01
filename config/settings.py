@@ -50,6 +50,10 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 SCREENSHOT_DIR = REPORTS_DIR / "screenshots"
 TRACE_DIR = REPORTS_DIR / "trace"
 HTML_REPORT = REPORTS_DIR / "html" / "report.html"
+# Allure 的原始结果目录（allure-pytest 写入）与生成后的静态报告目录。
+# 结果目录**不要**用 --clean-alluredir 清：history 就存在这里，清了趋势就断档。
+ALLURE_RESULTS = REPORTS_DIR / "allure-results"
+ALLURE_REPORT = REPORTS_DIR / "allure-report"
 
 # ---------------------------------------------------------------- 超时
 
@@ -248,5 +252,5 @@ def flight_base_url() -> str:
 
 def ensure_dirs() -> None:
     """建立证据目录。conftest 与 CI 都调用它，避免各自拼路径。"""
-    for d in (SCREENSHOT_DIR, TRACE_DIR, HTML_REPORT.parent):
+    for d in (SCREENSHOT_DIR, TRACE_DIR, HTML_REPORT.parent, ALLURE_RESULTS):
         d.mkdir(parents=True, exist_ok=True)

@@ -94,6 +94,8 @@
 | 已取证（2026-11-01 补，原先的 `⚠️[未查实]` 全部清掉） | 登录入口：`a.icon-new-wechat`（文本「微信」）。**协议勾选是前置闸门**：不勾 `input#checkboxAgreementInput` 就点微信，只弹 `div[data-testid="agreementTip"]`「请先阅读并勾选协议」，URL 停在 passport，看起来像「点了没反应」。授权页 `open.weixin.qq.com/connect/qrconnect`，两种形态：快捷登录面板 `div.js_quick_login`（178×179，含头像昵称 + `button.js_quick_login_btn`），或二维码 `img.js_qrcode_img`（160×160）。**该页没有「允许」按钮** —— 确认框在微信客户端的 Qt 窗口里（`EnumChildWindows` 返回 0，`uiautomation` 6 轮 `GetChildren()` 也是 0，只能按品牌绿 `#07C160` 像素定位后点击，实测按钮簇 189×37） |
 | 已实测：必须用系统 Chrome | 同一台机器、同一 URL、同一套代码，只换浏览器二进制：系统 Chrome `156.0.8078.79` 快捷登录 0.1s 出现；Playwright Chromium `156.0.8078.4` 永远 `display:none`。差异在网络层（微信页面 POST 六个回环端口 `/api/check-login`，Playwright 里 `14013` 报 `ERR_CONNECTION_CLOSED`，而 `curl -k` 直连返回 200），**不是指纹** —— 所以没有引入任何 stealth / UA 伪装 |
 | 已实测：两站不互通 | www 登录后用同一份 state 打开 `trains.ctrip.com` 仍判未登录 ⇒ 各采一份（`--entry trains` → `ctrip_state_trains.json`）。误用对方那份不会报错，只会稳定判「未登录」，详见 README 第 5 条 |
+| 已实测：跨站合并可三站同登录（2026-11-01 19:5x 补） | 用户要求「只登录一次跑完酒店/机票/火车票、每个功能不重启浏览器」，`shared_context` 因此改用 `utils.auth.merged_storage_state()`：www 打底 + 补 trains 那份里的 `trains.ctrip.com` 专属 cookie。探针 `tools/probes/probe_merged_auth.py` 一次启动浏览器对照三种策略，**A/B/C 全部 3/3**（www / flights / trains 顶部均显示用户名 `永永99999…`），实现选 A（语义最稳：主会话不被静默替换）。**同时修正上条的方向性**：`trains` 那份里的 20 个 `.ctrip.com` cookie 也能让 www / flights 判登录（同一账号），所以「不互通」只对「www 那份 → trains 站」这个单方向成立 |
+| 合并后的验证 | `HEADED=1 pytest suites/e2e -m e2e` → **12 passed / 325.14s**；日志 `reports/logs/run_20261101_200211.log` 只有 **1 条**「共享会话登录态」，全程无 page 重建（`SharedSession.rebuilds` 未触发）。另用生产函数单独验三站：www / flights / trains 均 `登录=True` |
 | 与匿名轨的隔离 | 三条硬隔离：scope 独立（`ui_auth`，不并入 ui / ui_hotels 的 ratio 序列）；context 独立（匿名用例仍匿名，K-04 的「提交路径落 passport」实验条件不被改）；缺文件时 `skip("known-limit: AUTH-01 …")` 而非 fail（不进分母，不让 CI 永久红） |
 | 凭据边界 | state 是**明文会话 cookie**，等价账号凭据。`config/auth/` 已进 `.gitignore`；不进 CI、不进 secret；不因被拦而换账号重试。谁要把 state 放进 CI secret，等于同时推翻 K-04「CI 无法安全持有凭据」的判断，必须重新裁决 |
 | 已实测的坑① | 首页底部「周周享低价 / 领券更划算」浮层带一张**营销二维码**（2026-11-01 截图证据），会让「二维码可见」类断言假绿。`utils/overlay.py` 已在 `BasePage.goto` 后自动关它，`OVERLAY_AUTOCLOSE=0` 可关 |
@@ -138,3 +140,13 @@
 | 未覆盖 | 火车票的 `TrainSearchPage._goto_month` 只支持**向后**翻（`›`，最多 3 次），且月份标签不带年份。本期火车票数据都在当月，未触发；要跨年/往回翻得另做（探针未取证） |
 | 销号条件 | 不需要销号：这是「按站点真实行为实现」，不是限制。若站点改成「日历总是从今天起渲染」，翻月循环会自然不再执行 |
 
+
+## K-10 报告链路上的三个坑（Allure 接入，2026-11-01 实测）
+
+| 项 | 内容 |
+|---|---|
+| 坑①：插件版本与 pytest 9 不兼容 | PyPI simple 索引**不保证排序**：列表尾部是 `allure-pytest 2.9.45`，实际稳定最新为 `2.16.2`。装 2.9.45 后 125 条用例在 **setup 阶段全部 ERROR**，报错在 `allure_pytest/listener.py:79` 的 `_test_fixtures(item)` —— 它读的 `item.session._fixturemanager` 在 pytest 9 已换 API。换 2.16.2 后实测 **125 passed**。口径已固化：查版本用 `scripts/check_latest.py`（SemVer 排序 + 排除预发布），见 `AGENTS.md` 第 3 条 |
+| 坑②：多文件报告用 `file://` 打开是 500 | 浏览器打开 `reports/allure-report/index.html` 显示 **「500 Failed to fetch」**，不是报告坏了：多文件报告的数据靠 XHR 读 `data/*.json`，`file://` 下被安全策略拒绝。修法：`--single-file` 出 `reports/allure-report-single/index.html`（3.9 MB，数据内嵌，双击可用）。**但单文件不落 `history/`**，只留它会失去趋势 ⇒ 两份都要出，`scripts/allure_report.py` 已固化为默认行为 |
+| 坑③：Behaviors 树只认三层 | 只有 epic/feature 而没有 `story` 的用例**不会进 Behaviors 树**：首轮 125 条里只有 2 条出现在该页。已在 `conftest._allure_labels` 里给每条用例补默认 story（e2e 保留自己的 `@allure.story`，避免多出一层）。注意 `widgets/behaviors.json` 的 `statistic.total` 显示 2 是它自己的直接子节点计数，**要看 `data/behaviors.json`**（实测 1 epic → 2 feature → 9 story）才算数 |
+| 未覆盖 | Graphs 里的「趋势」需要至少两次 generate 才有两根柱子；本次只跑了两次、第二次已续上 history（日志 `历史续接：是`），但**还没做连续 3 次以上的趋势验证**。⚠️[未查实] Allure 2.46 在单文件模式下是否也渲染趋势图 |
+| 与门禁的关系 | Allure 报告本身**不进 CI 门禁**：门禁仍读 junit（`scope` 写在 `user_properties`），报告只解决「人怎么看」。改报告链不会影响 `docs/BLOCKED-GATE.md` 的判定 |

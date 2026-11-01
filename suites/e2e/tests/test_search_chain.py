@@ -27,9 +27,10 @@ K-04 / K-05 的结论也就不可比了。
 
 from __future__ import annotations
 
+import allure
 import pytest
 
-from conftest import check_waf_block
+from utils.waf import check_waf_block
 from pages.base_page import BasePage
 from utils.case_data import (
     case_ids,
@@ -95,6 +96,8 @@ def _assert_outcome(page, request, out: SearchOutcome, rebuilds: int) -> None:
 
 # ---------------------------------------------------------------- 酒店（3 组）
 
+@allure.story("酒店：首页填写 → 提交 → 结果列表")
+@allure.title("酒店搜索 {case.city} {case.checkin} 起 {case.nights} 晚 {case.rooms} 间")
 @pytest.mark.parametrize("case", HOTELS, ids=case_ids(HOTELS))
 def test_chain_hotels(shared_page, shared_session, request, case):
     """酒店：首页填表 → 提交 → 列表出卡片。"""
@@ -117,6 +120,8 @@ def test_chain_hotels(shared_page, shared_session, request, case):
 
 # ---------------------------------------------------------------- 火车票（3 组）
 
+@allure.story("火车票：填区间 → 选日期 → 提交 → 车次列表")
+@allure.title("火车票搜索 {case.from_city} → {case.to_city} {case.depart_date}")
 @pytest.mark.parametrize("case", TRAINS, ids=case_ids(TRAINS))
 def test_chain_trains(shared_page, shared_session, request, case):
     """火车票：填区间 → 选日期 → 提交 → 出车次。
@@ -134,6 +139,8 @@ def test_chain_trains(shared_page, shared_session, request, case):
 
 # ---------------------------------------------------------------- 机票（4 组）
 
+@allure.story("机票：切单程 → 填区间 → 日历选日（跨月）→ 提交 → 航班列表")
+@allure.title("机票搜索 {case.from_city} → {case.to_city} {case.depart}")
 @pytest.mark.parametrize("case", FLIGHTS, ids=case_ids(FLIGHTS))
 def test_chain_flights(shared_page, shared_session, request, case):
     """机票：切单程 → 填区间 → 日历选日期（跨月）→ 收日历 → 提交 → 出航班。"""

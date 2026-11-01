@@ -8,3 +8,9 @@ pytest-html==4.2.0
 # 缺这个插件时该 ini 项会被静默忽略（只发一条 warning），
 # 结果就是"以为挂了超时其实没挂"，直到某条用例真的挂死才暴露。
 pytest-timeout==2.4.0
+# Allure 报告插件。**必须放主依赖**：pytest.ini 的 addopts 固定带 --alluredir，
+# 缺插件时 pytest 会以 "unrecognized arguments: --alluredir" 直接退出 ——
+# 不是「少一份报告」，而是整条命令跑不起来。
+# 版本下限是实测结论：2.9.x 与 pytest 9 的 fixture 内部 API 不兼容，setup 阶段
+# 全部报错（见 docs/KNOWN-LIMITATIONS K-10）；2.16.2 实测 125 passed。
+allure-pytest==2.16.2
