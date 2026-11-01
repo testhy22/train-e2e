@@ -18,16 +18,17 @@ import re
 
 import pytest
 
-from config import settings
 from pages.hotel_search_page import HotelSearchPage
-from utils.hotel_data import load_cases
+from utils.case_data import case_ids, load_hotel_search_cases
 
 pytestmark = [pytest.mark.ui, pytest.mark.hotels]
 
-CASES = load_cases(settings.PROJECT_ROOT / "test_data" / "hotel_cases.yaml")
+# 数据在 data/hotels/search_cases.yaml（可用 CASE_DATA_DIR 覆盖）。
+# 用例只读 case 并执行，不在这里写任何数字。
+CASES = load_hotel_search_cases()
 
 
-@pytest.mark.parametrize("case", CASES, ids=[c.param_id for c in CASES])
+@pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
 def test_search_submits_expected_params(page, request, blocked_guard, case):
     hotel = HotelSearchPage(page)
 
