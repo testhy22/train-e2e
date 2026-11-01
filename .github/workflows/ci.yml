@@ -19,7 +19,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 数据质量门。独立成 job 而不是塞进 ui 的第一步，理由有三：
+  #   1. 它**不装浏览器**（纯离线，约 2 秒），放在 ui 里等于让数据问题排在一次
+  #      `playwright install` 之后才红；
+  #   2. 两条轨道（ui / ui_hotels）将来都要它，写在 ui 里就得复制一份到 hotels，
+  #      两份校验迟早不同步；
+  #   3. 用 `needs: data` 挂到 suite job 上，新加轨道只要写一行 needs 就自动继承。
+  # 约束：**新增任何 suite job 都必须 `needs: data`** —— 这是唯一的强制入口。
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 数据质量校验
+        # 覆盖 data/hotels 与 data/trains 两份：id 唯一 / ASCII / 无敏感信息 /
+        # 日期不变量 / expected 闭集 / city_id 实测映射 / 基准日可注入与午夜不漂。
+        # 数据配错在这里就红，而不是表现成「某条 UI 用例莫名失败」。
+        run: python -m pytest tools/tests/test_case_data.py -q
+
   ui:
+    needs: data
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -37,11 +68,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-
-      - name: 数据质量校验（先于浏览器）
-        # 纯离线、约 2 秒。数据配错要在装浏览器之前就红 ——
-        # 否则表现为「某条 UI 用例莫名失败」，查半天才发现是 yaml 里一个数字写错。
-        run: python -m pytest tools/tests/test_case_data.py -q
 
       - name: 安装浏览器
         run: python -m playwright install --with-deps chromium
@@ -117,6 +143,7 @@ jobs:
 # 本轮只落草案：打开方式是把下面每行的 "# " 去掉（行内缩进会保留），再按上面三条确认。
 #
 #   hotels:
+#     needs: data          # 数据门在这里，与 ui job 同一入口
 #     runs-on: ubuntu-latest
 #     timeout-minutes: 30
 #     env:
