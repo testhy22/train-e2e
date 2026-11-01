@@ -15,3 +15,8 @@ Faker==40.44.0
 # 登录态采集（scripts/setup_auth.py）用：截微信确认框、按品牌绿定位「允许」按钮。
 # 只在本地建登录态时需要，CI 不跑那个脚本，所以放 dev 而不是主依赖。
 pillow==13.0.0
+
+# 可选探针 tools/probes/probe_uia_allow.py 用：按 UIAutomation 读微信「允许」按钮文字。
+# 仅 Windows 可用（依赖系统 COM），不参与测试运行，故加 win32 环境标记，
+# 避免 Linux/macOS 上 `pip install -r requirements-dev.txt` 因装不上而失败。
+uiautomation ; sys_platform == "win32"

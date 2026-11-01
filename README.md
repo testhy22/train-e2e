@@ -7,6 +7,21 @@
 
 ---
 
+## 〇、技术栈与版本要求
+
+- **语言**：Python —— CI 实测 **3.12**（依赖本身要求 3.9+，但更老版本未全量验证）。
+- **测试框架**：pytest **9.2.0**。
+- **浏览器驱动**：Playwright **1.64.1** + pytest-playwright **0.10.0**（需另装浏览器二进制：`python -m playwright install chromium`）。
+- **测试报告**：pytest-html **4.2.0**（内置）；Allure **2.x**（可选，生成需 JRE 17+ 与 Allure CLI，见「十一、Allure 报告」）。
+- **其他运行时依赖**：PyYAML **6.0.3**、pytest-timeout **2.4.0**、allure-pytest **2.16.2**。
+- **开发 / 质量工具**（仅 `requirements-dev.txt`，非跑用例必需）：pytest-xdist、pytest-randomly、ruff、mypy、Faker、pillow（Windows 探针另需 `uiautomation`，已用 `win32` 标记隔离，不参与测试运行）。
+
+> 以上版本号均为仓库内 `requirements.txt` / `requirements-dev.txt` 中 `==` 锁定的值。
+> 克隆后直接按锁文件安装即可，**无需手动对齐版本**；CI 也以同一锁文件安装
+> （`.github/workflows/ci.yml`，`runs-on: ubuntu-latest`，仅装 `requirements.txt`）。
+
+---
+
 ## 一、工程规则（原文，接手人请照此执行）
 
 1. 禁止把定位器和业务操作写在测试函数里；测试只做「编排 + 断言」，元素与交互封装在 `pages/`。
@@ -28,6 +43,32 @@
 ---
 
 ## 二、跑起来
+
+### 首次克隆后完整启动步骤
+
+```bash
+# 1) 克隆
+git clone https://github.com/testhy22/train-e2e.git
+cd train-e2e
+
+# 2) 安装依赖（按锁文件：pytest / playwright / allure 插件等）
+python -m pip install -r requirements.txt
+
+# 3) 安装浏览器二进制（版本须与 playwright 一致，见「常见问题」）
+python -m playwright install chromium
+
+# 4)（可选）环境变量：所有变量都有代码内默认值，不配也能跑；
+#    仅在需要改目标站 / 超时 / 本地有头调试时才动。
+cp .env.example .env
+
+# 5) 跑一次全量（含 27 条数据层单测）
+python -m pytest
+```
+
+> 环境变量清单与含义见 `.env.example`（已随仓库提交，`.env` 本身被忽略，不会入库）。
+> 依赖版本以仓库内 `requirements.txt` / `requirements-dev.txt` 的 `==` 锁定值为准，无需手动对齐。
+
+### 常用安装与运行命令
 
 ```bash
 python -m pip install -r requirements.txt
@@ -80,6 +121,24 @@ Linux 无显示服务时的行为、与 CI 的差异表，全部在
 
 - `HEADED=1` 会自动开拟人，**默认不要再叠加 `--slowmo`**，看不清再加 `SLOWMO=300/800`。
 - 拟人只调时间不碰身份，被拦照旧记 `blocked` → `xfail`，**不因为被拦就调慢重试**。
+
+### 预期成功的控制台输出
+
+全量 `python -m pytest` 在「目标站可正常打开」情景下的典型末尾（数字随用例数变化）：
+
+```
+=================== 126 passed in 325.03s ===================   # 实测样例
+```
+
+判读要点：
+
+- `passed` 表示用例按预期执行并完成断言；数据层单测（`tools/tests`、`suites/...` 中不带 `ui` 标记的部分）也包含在内。
+- 若目标站触发风控（滑块 / 验证码 / 限流文案 / WAF 文本页），对应用例会记为 `XFAIL`
+  —— 这不是失败，是「被拦」这一**一等结果**被正确记录，不影响「跑通」判定。
+- 退出码：`0` = 绿/黄（含 `XFAIL` 都属正常结果），`1` = 红，`2` = 口径不成立（见门禁规则）。
+  注意：环境钩子拦截临时目录清理时也可能返回非零，需结合「有无失败用例」而非只看退出码。
+
+> 想要趋势化报告，见「十一、Allure 报告」。
 
 ---
 
