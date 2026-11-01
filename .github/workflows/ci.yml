@@ -41,6 +41,13 @@ jobs:
       - name: 安装浏览器
         run: python -m playwright install --with-deps chromium
 
+      - name: 安装 xvfb（trains 需要显示服务）
+        # trains.ctrip.com 在无头模式下整站返回 432 `whaleguard block`，有头才 200
+        # （2026-11-01 实测：有头 200/953 字符、无头 432/17 字符，同一分钟对照）。
+        # xvfb 是在无显示服务的机器上提供一块虚拟屏，让 Chromium 能以有头模式启动；
+        # 它不改变浏览器对外暴露的身份，也不改任何断言。
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: 取回 ledger（G3/G4 要历史）
         run: |
           mkdir -p .ledger
@@ -55,9 +62,12 @@ jobs:
       - name: UI 用例（独立 junit，供门禁消费）
         id: ui
         continue-on-error: true       # blocked 是 xfail，pytest 本身退出 0；真失败由 G0 兜
+        env:
+          HEADED: "1"                 # 有头：无头下 trains 恒被 432 拦，轨道会永远红
+          HUMAN: "0"                  # 关键：HEADED=1 会自动开拟人，CI 必须显式关掉
         run: |
           mkdir -p reports
-          python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
+          xvfb-run -a python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
 
       - name: blocked 门禁
         id: gate
