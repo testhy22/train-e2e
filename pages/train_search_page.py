@@ -135,7 +135,7 @@ class TrainSearchPage(BasePage):
         box = self.page.locator(selector)
         expect(box).to_be_visible()
 
-        box.click()
+        self.human.click(box)
         box.fill("")
 
         # 点选要重试 + 每次都读回核对（2026-11-01 实测根因，K-11）：
@@ -167,7 +167,7 @@ class TrainSearchPage(BasePage):
                 f"（期望 {city!r}），重来；面板当时："
                 f"{' | '.join(self._pick_trace) or '(未记录)'}"
             )
-            box.click()
+            self.human.click(box)
             box.fill("")
 
         raise WidgetUnavailable(
@@ -190,7 +190,12 @@ class TrainSearchPage(BasePage):
         """
         box.fill("")
         if by_typing:
-            box.press_sequentially(city, delay=settings.TYPE_DELAY_MS)
+            if self.human.disabled:
+                # 关闭时保持原行为（固定 80ms），字节级不变；开启才换非均匀节奏。
+                box.press_sequentially(city, delay=settings.TYPE_DELAY_MS)
+            else:
+                # 110–190ms 非均匀 + 每 2–3 字符一次加顿；城市名 2–4 字符，单字段远低于 3s。
+                self.human.type_text(box, city)
         else:
             box.fill(city)
 
@@ -242,7 +247,7 @@ class TrainSearchPage(BasePage):
             text = _norm(label.inner_text())
             self._pick_trace.append(f"[{i}]{text}")
             if text == want:
-                items.nth(i).click()
+                self.human.click(items.nth(i))
                 return True
         return False
 
@@ -281,7 +286,7 @@ class TrainSearchPage(BasePage):
         block = self.page.locator(self.DATE_BLOCK).first
         try:
             expect(block).to_be_visible(timeout=settings.EXPECT_TIMEOUT_MS)
-            block.click()
+            self.human.click(block)
         except (AssertionError, PlaywrightTimeout) as exc:
             raise WidgetUnavailable(
                 f"日期块 {self.DATE_BLOCK} 点不动（可能被城市面板遮罩拦住），"
@@ -318,7 +323,8 @@ class TrainSearchPage(BasePage):
             nxt = self.page.locator(self.CALENDAR).get_by_text("›", exact=True).first
             if not nxt.is_visible():
                 break
-            nxt.click()
+            # 翻月可能连点：用 quick 档（单次 150–350ms），避免 3×400ms 的累积机械节奏。
+            self.human.click_quick(nxt)
         if not self._month_visible(month_label):
             raise WidgetUnavailable(f"日历里翻不到 {month_label}")
 
@@ -362,7 +368,7 @@ class TrainSearchPage(BasePage):
             if not label.count():
                 continue
             if _norm(label.inner_text()) == want_day:
-                cells.nth(i).click()
+                self.human.click(cells.nth(i))
                 return
         raise WidgetUnavailable(f"{month_label} 里找不到 {day} 日")
 
@@ -390,7 +396,7 @@ class TrainSearchPage(BasePage):
     def submit(self) -> None:
         """点搜索并等结果页。"""
         logger_info("[火车票] 点击搜索并等待结果页")
-        self.search_button().click()
+        self.human.click(self.search_button())
         self.page.wait_for_url(re.compile(r"/webapp/train/list"), timeout=settings.NAV_TIMEOUT_MS)
         self.wait_ready()
         self.assert_not_blocked()

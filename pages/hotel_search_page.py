@@ -218,7 +218,9 @@ class HotelSearchPage(BasePage):
         """
         if self.page.locator(self.CAL_DAYS).count() == 0:
             return
-        self.page.mouse.click(20, 20)
+        # 探针 42：Esc 关不掉这个面板，坐标点空白是一次生效的正解（Esc 兜底保留）；
+        # HUMAN=1 时坐标加抖动，避免固定 (20, 20) 的指纹级特征。
+        self.human.click_neutral(20, 20)
         try:
             expect(self.page.locator(self.CAL_DAYS)).to_have_count(0)
         except AssertionError:
@@ -389,6 +391,8 @@ class HotelSearchPage(BasePage):
         )
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
+        # 直连列表页同样导航后停一拍（HUMAN=1），与 BasePage.goto 口径一致（边界 3）。
+        self.human.read()
 
     def result_card_count(self) -> int:
         """酒店卡片数量。类名语义前缀 `hotel-card`（实测 13 条，见 probe 06）。"""

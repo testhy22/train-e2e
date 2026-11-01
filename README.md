@@ -115,7 +115,7 @@ whaleguard 拦截（HTTP 432 → 记 `blocked → xfail`，是已知外部限制
 
 ```bash
 scripts/run-headed.sh suites/hotels -m hotels
-SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui     # trains 还没接拟人，要慢放
+SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui     # 想把每步看得更慢才加（火车票已接拟人）
 ```
 
 脚本固定 `HEADED=1 HUMAN=1`。四个开关（`HEADED` / `HUMAN` / `HUMAN_SEED` / `SLOWMO`）、
@@ -126,6 +126,20 @@ Linux 无显示服务时的行为、与 CI 的差异表，全部在
 
 - `HEADED=1` 会自动开拟人，**默认不要再叠加 `--slowmo`**，看不清再加 `SLOWMO=300/800`。
 - 拟人只调时间不碰身份，被拦照旧记 `blocked` → `xfail`，**不因为被拦就调慢重试**。
+
+拟人化的定位（2026-11-02 定案）：**预防性措施，不是解封手段** —— 解封关键已实证是
+`HEADED=1`（K-05）；拟人化只降低单次被行为模型命中的概率，**不提高吞吐、不改变
+「失败即停/熔断」与 blocked→xfail 语义**。
+
+开关三态：`HUMAN=1` 强制开 / `HUMAN=0` 强制关 / **未设 ⇒ 跟随 HEADED**（有头开、
+无头关）。CI 恒 `HUMAN=0`，不受影响；长期低频跑显式 `HUMAN=1`。
+
+耗时口径（2026-11-02 实测，`-m e2e` 整轨 13 条有头）：
+`HUMAN=0` ≈ 212s；`HUMAN=1` ≈ 296s（**软上限 ≈5 分钟，超 6 分钟须重新归因**）。
+其中本次新增代码贡献约 +18s（火车 +5–6s/条、登录自检 +0.5s/条，**硬约束**），
+其余约 +65s 是酒店/机票既有拟人调用随开关激活的存量成本。预算分层，不再用单一
+整轨预算衡量。覆盖：酒店/机票/火车三页 POM 均已接入（火车票 2026-11-02 补齐）；
+轮询类 wait（语义是等条件）刻意不拟人（humanize 边界 3）。
 
 ### 预期成功的控制台输出
 

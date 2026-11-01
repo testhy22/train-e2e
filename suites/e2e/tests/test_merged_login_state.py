@@ -49,6 +49,7 @@ import pytest
 from config import settings
 from pages.base_page import BasePage
 from utils.auth import looks_like_login_wall, wait_logged_in
+from utils.humanize import Humanizer, human_enabled
 from utils.waf import check_waf_block
 
 pytestmark = [pytest.mark.e2e]
@@ -112,10 +113,18 @@ def test_merged_state_logged_in_on_all_sites(shared_page, shared_session, reques
     rows: list[str] = []
     failed: list[str] = []
 
+    # 裸 goto 的导航后停一拍也要同一口径（HUMAN 关闭时零开销）。
+    human = Humanizer(
+        shared_page,
+        enabled=human_enabled(settings.HEADLESS, settings.HUMAN_RAW),
+        seed=settings.HUMAN_SEED,
+    )
+
     for label, entry in SITES:
         url = _site_url(entry)
         with allure.step(f"打开 {label}：{url}"):
             shared_page.goto(url, wait_until="domcontentloaded", timeout=settings.NAV_TIMEOUT_MS)
+            human.read()
 
         # 被对方拦下时，**任何登录判定都不成立**（拿不到 header，也拿不到用户名）。
         # 先判 WAF，避免把「被拦」误读成「掉登录」—— 这两种红的处置完全不同。

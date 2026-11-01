@@ -35,7 +35,9 @@ import re
 
 from playwright.sync_api import BrowserContext, Page
 
+from config import settings
 from utils.auth import is_logged_in
+from utils.humanize import Humanizer, human_enabled
 
 # 用户区（触发浮层的锚点）。www 与 trains 同构，均由
 # tools/probes/probe_header_user.py / probe_trains_header.py 取证。
@@ -69,6 +71,12 @@ class HeaderAccount:
 
     def __init__(self, page: Page) -> None:
         self.page = page
+        # 拟人节奏与页面对象同一配置源（HUMAN / HUMAN_SEED）；关闭时全部原语等价原生调用。
+        self.human = Humanizer(
+            page,
+            enabled=human_enabled(settings.HEADLESS, settings.HUMAN_RAW),
+            seed=settings.HUMAN_SEED,
+        )
 
     # ------------------------------------------------------------ 展开菜单
 
@@ -99,9 +107,9 @@ class HeaderAccount:
         box = zone.bounding_box()
         if not box:
             raise LogoutUnavailable("用户区没有可点击的边界框（宽度或高度为 0）")
-        self.page.mouse.move(
-            box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-        )
+        # HUMAN=1 时按 8–16 步移过去（真人位移）；关闭时单步，字节级同旧行为。
+        # 仍是物理位移而非 hover()：菜单由 pointerenter 触发，上面的理由不变。
+        self.human.move_to_xy(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
         # 轮询等浮层真正出现。不硬 sleep：菜单是懒渲染（悬停前节点数为 0），
         # 只能靠「目标节点出现」判定，用上限 + 轮询，和等元素出现是同一类等待。
@@ -142,7 +150,10 @@ class HeaderAccount:
         # 点之前先记下「点得到」这件事：浮层遮挡时 click 会抛「被拦截」，
         # 那属于结构问题（转 LogoutUnavailable），不是退出失败。
         try:
-            entry.click(timeout=5000)
+            if self.human.disabled:
+                entry.click(timeout=5000)  # 关闭路径保持原 5s 上限，字节级不变
+            else:
+                self.human.click(entry)
         except Exception as exc:
             raise LogoutUnavailable(f"退出入口点不动（可能被浮层遮挡）：{type(exc).__name__}: {exc}") from exc
 

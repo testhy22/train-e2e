@@ -329,7 +329,8 @@ class FlightSearchPage(BasePage):
         except Exception:
             return True
 
-        self.page.mouse.click(20, 20)
+        # 探针 39：Esc 被页面吃掉，坐标点空白一次生效；HUMAN=1 时坐标加抖动。
+        self.human.click_neutral(20, 20)
         try:
             modal.first.wait_for(state="hidden", timeout=settings.EXPECT_TIMEOUT_MS)
             return True

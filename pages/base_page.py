@@ -145,6 +145,9 @@ class BasePage:
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
         self.dismiss_overlays()
+        # HUMAN=1 时导航后停一拍（600–1300ms），打散「加载完立刻操作」的机器节奏；
+        # 关闭时零开销。这是动作间停顿，不替代上面的 wait_ready 与后续 expect（边界 3）。
+        self.human.read()
         logger_info(f"[{self.__class__.__name__}] 已载入 title={self._safe_title()!r}")
 
     def _safe_title(self) -> str:
