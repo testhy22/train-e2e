@@ -14,7 +14,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from utils import case_data
+from utils import case_data, hotel_data
 from utils.case_data import (
     case_ids,
     describe,
@@ -28,6 +28,10 @@ TODAY = date(2026, 11, 1)
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # 只做粗筛：手机号、18 位身份证、15 位旧身份证。不追求严谨识别，追求「写进去就会被拦」。
 SENSITIVE = re.compile(r"(\b1[3-9]\d{9}\b|\b\d{17}[\dXx]\b|\b\d{15}\b)")
+
+# expected 的**闭集**：只允许用例真的会消费的键。写进来却没人读 = 会漂的第二个真相。
+HOTEL_EXPECTED_KEYS = {"city_id", "city_display"}
+TRAIN_EXPECTED_KEYS = {"http_status", "title_contains"}
 
 
 def _common(cases, label: str) -> None:
@@ -68,9 +72,23 @@ def test_hotel_cases_are_valid():
             f"{case.id}: 退房日必须等于入住日 + nights"
         )
         assert case.checkin > TODAY, f"{case.id}: 入住日必须晚于今天（偏移量应当为正）"
+        assert case.expected.keys() <= HOTEL_EXPECTED_KEYS, (
+            f"{case.id}: expected 里有没人消费的键 "
+            f"{sorted(set(case.expected) - HOTEL_EXPECTED_KEYS)}"
+        )
+        city_id = case.expected.get("city_id")
+        assert isinstance(city_id, int) and not isinstance(city_id, bool) and city_id > 0, (
+            f"{case.id}: expected.city_id 必须是正整数（站点侧城市 id，"
+            f"实测见 reports/probe_city_id.json），收到 {city_id!r}"
+        )
         city_display = case.expected.get("city_display", "")
         assert city_display.startswith(case.city), (
             f"{case.id}: expected.city_display 应以城市名开头，收到 {city_display!r}"
+        )
+        # 只到这里为止：**不**断言 display 的完整格式。实测（2026-11-01）
+        # 上海/北京 是「城市, 中国」，广州是「城市, 省, 中国」。
+        assert "中国" in city_display, (
+            f"{case.id}: expected.city_display 应含「中国」，收到 {city_display!r}"
         )
 
 
@@ -87,6 +105,10 @@ def test_train_cases_are_valid():
             f"{case.id}: depart_offset_days 必须在 +3..+15（预售期）"
         )
         assert case.min_results >= 1, f"{case.id}: min_results 必须 >= 1"
+        assert case.expected.keys() <= TRAIN_EXPECTED_KEYS, (
+            f"{case.id}: expected 里有没人消费的键 "
+            f"{sorted(set(case.expected) - TRAIN_EXPECTED_KEYS)}"
+        )
         assert case.expected.get("http_status") == 200, (
             f"{case.id}: 期望 http_status 应为 200 —— 无头下的 432 是 K-05 记录的环境问题，"
             "不是这条数据该编码的东西"
@@ -95,6 +117,80 @@ def test_train_cases_are_valid():
             f"{case.id}: expected.title_contains 不能为空"
         )
         assert case.depart_date == (TODAY + timedelta(days=case.depart_offset_days)).isoformat()
+
+
+# ---------------------------------------------------------------- 偏移日期边界
+#
+# 基准日可注入（`parse_case(today=…)`），所以下面全是确定断言：
+# 不依赖 `date.today()`，也不会因为正好跑在 23:59 而漂。
+
+BASE_SAMPLE = {"id": "edge", "city": "上海"}
+
+
+def _edge(offset: int, nights: int, base: date):
+    return hotel_data.parse_case(
+        {**BASE_SAMPLE, "checkin_offset_days": offset, "nights": nights}, today=base
+    )
+
+
+@pytest.mark.parametrize(
+    "base, offset, nights, want_in, want_out",
+    [
+        # 跨月
+        (date(2026, 11, 25), 7, 2, date(2026, 12, 2), date(2026, 12, 4)),
+        # 跨年
+        (date(2026, 12, 28), 7, 2, date(2027, 1, 4), date(2027, 1, 6)),
+        # 月末 31 号 + 1
+        (date(2026, 12, 31), 1, 1, date(2027, 1, 1), date(2027, 1, 2)),
+        # 闰年 2 月末：2028-02-28 + 1 = 02-29（闰日），再住 2 晚跨到 03-02
+        (date(2028, 2, 28), 1, 2, date(2028, 2, 29), date(2028, 3, 2)),
+        # 平年 2 月末：2027-02-28 + 1 = 03-01（没有 02-29 可落）
+        (date(2027, 2, 28), 1, 1, date(2027, 3, 1), date(2027, 3, 2)),
+    ],
+)
+def test_offset_date_arithmetic(base, offset, nights, want_in, want_out):
+    """跨月 / 跨年 / 月末 / 闰年与平年的 2 月末，入住与退房都要落对。"""
+    case = _edge(offset, nights, base)
+    assert (case.checkin, case.checkout) == (want_in, want_out), (
+        f"基准 {base} + {offset} 天住 {nights} 晚 → 实际 {case.checkin}/{case.checkout}"
+    )
+    assert (case.checkout - case.checkin).days == nights
+
+
+def test_base_date_is_injectable():
+    """同一个偏移量、不同基准日 ⇒ 日期整体平移，证明基准日真的是参数而不是写死今天。"""
+    a = load_hotel_search_cases(today=date(2026, 12, 24))
+    b = load_hotel_search_cases(today=date(2027, 1, 24))
+    shift = (date(2027, 1, 24) - date(2026, 12, 24)).days
+    assert [c.id for c in a] == [c.id for c in b], "基准日不该影响用例集合"
+    for older, newer in zip(a, b):
+        assert (newer.checkin - older.checkin).days == shift
+        assert (newer.checkout - older.checkout).days == shift
+
+
+def test_base_date_captured_once(monkeypatch):
+    """午夜边界：入住与退房必须由**同一次**取到的基准日推出。
+
+    若写成 `checkin = date.today() + …` 再 `checkout = date.today() + …`，
+    在 23:59:59.9 跨到次日时会多出一天，且只在午夜前后偶发红。
+    这里把 `date.today()` 换成「第一次返回 11-01、之后返回 11-02」的假 date：
+    真实现只调一次 ⇒ 稳定；调两次 ⇒ 立刻红。
+    """
+    calls: list[int] = []
+
+    class FlakyDate(date):
+        @classmethod
+        def today(cls):  # noqa: D102 - 只在测试里用
+            calls.append(1)
+            return date(2026, 11, 1) if len(calls) == 1 else date(2026, 11, 2)
+
+    monkeypatch.setattr(hotel_data, "date", FlakyDate)
+    case = hotel_data.parse_case({**BASE_SAMPLE, "checkin_offset_days": 7, "nights": 2})
+
+    assert len(calls) == 1, f"基准日取了 {len(calls)} 次 —— 午夜跨天时 checkout 会漂"
+    assert case.checkin == date(2026, 11, 8)
+    assert case.checkout == date(2026, 11, 10)
+    assert (case.checkout - case.checkin).days == 2
 
 
 # ---------------------------------------------------------------- 包装头与目录
