@@ -54,3 +54,15 @@
 | 现在留什么 | 视口截图 + 全页截图 + URL + title，写进报告 section |
 | 为什么不改 | 改成 `--tracing=on` 会让每次运行都录完整 trace（体积与耗时翻倍）；把 blocked 当失败又违背「blocked 是一等结果」 |
 | 销号条件 | 出现「只有 trace 才能定位」的拦截问题，且复现成本高于全量录制 |
+
+## K-05 trains 在无头模式下整站被 WAF 拦（432）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `trains.ctrip.com` 用 headless 打开时返回 **HTTP 432**，正文只有 17 字符 `whaleguard block`，标题为空；同一分钟改成有头则是 **200**、正文 953 字符、标题正常 |
+| 取证 | 2026-11-01 01:38 与 14:2x 两次独立对照。第二次实测：`headless=False status=200 正文=953字符 耗时=1.0s` / `headless=True status=432 正文=17字符 耗时=2.7s`。累计 headless 7/7 被拦、headful 5/5 正常 |
+| **范围（重要）** | **只作用于 trains 子域，不是整站。** `www.ctrip.com` 的酒店模块在 headless 下正常出结果：2026-11-01 三份 junit 逐条一致（`00:43` headless、`01:21` headless、`01:43` headed 均 3 passed）。曾把这条写成「无头模式整站被拦」，是错的，已更正 |
+| 为什么不是缺陷 | 站点对无头浏览器的识别，与本工程代码无关。**不通过改 UA / 注入 stealth 脚本 / 随机化启动参数去绕** —— 那是把自己变成反检测工具 |
+| 影响 | ① CI 的 trains job 改 `xvfb-run -a` + `HEADED=1`（虚拟屏让 Chromium 能以有头模式启动，不改身份、不改断言）；② hotels job **维持 headless**，不为此付有头的成本；③ 本地调试用 `scripts/run-headed.sh` |
+| 不做什么 | 不把 `config/settings.py` 的默认 `HEADLESS` 改掉 —— 默认无头是 CI 的正确行为，只为「让窗口可见」改默认值会把本地需求带进流水线 |
+| 销号条件 | trains 在 headless 下连续 3 次返回 200 且正文 ≥500 字符；届时把 CI 的 `xvfb-run` 撤掉，改回 `python -m pytest` |

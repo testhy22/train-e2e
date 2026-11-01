@@ -12,7 +12,8 @@
 1. 禁止把定位器和业务操作写在测试函数里；测试只做「编排 + 断言」，元素与交互封装在 `pages/`。
 2. **禁止用裸 `time.sleep()` / `page.wait_for_timeout()` 做同步等待**，一律用 Playwright
    自动等待或显式 `expect(...)` 条件等待。
-   —— 允许：`press_sequentially(delay=60~120)` 模拟输入节奏、`expect(locator).to_be_visible()`。
+   —— 允许：`expect(locator).to_be_visible()`；以及 `utils/humanize.py` 的拟人节奏
+   （只在动作之间停顿，**不得**用来等页面状态，边界见该文件头）。
 3. 测试数据不得硬编码在测试文件内，全部写进 `test_data/*.yaml`。
 4. 失败必须留下证据：截图 + URL + title 写进报告；trace 用 `retain-on-failure`。
 5. 选择器优先语义定位（`get_by_role` / `get_by_placeholder` / `get_by_text`），避免层级 CSS。
@@ -20,7 +21,9 @@
    并在注释里写明「功能必要，非规避手段」。
 7. 每条用例可独立运行，不依赖前一条的状态。
 8. **不写任何反检测代码**：不改 UA、不加 `--disable-blink-features=AutomationControlled`、
-   不做以「规避识别」为目的的随机节奏。被拦就如实记录。
+   不注入 stealth 脚本、不按「哪里被拦」调参重试。被拦就如实记录。
+   拟人节奏（`HUMAN`）只调**时间**、不碰**身份**，用途是本地有头时让人看清操作；
+   它**不是**规避手段，CI 里恒关闭（`HUMAN=0`）。
 
 ---
 
@@ -31,7 +34,7 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium        # 需与 playwright 版本匹配，见「常见问题」
 
 python -m pytest                             # 全量（含 27 条数据层单测）
-HEADED=1 python -m pytest suites/thirdparty/tests/test_smoke.py    # 有头，本地调试
+scripts/run-headed.sh suites/hotels -m hotels    # 有头，本地看窗口（见下节）
 BASE_URL=https://your-site.example python -m pytest suites/thirdparty   # 换目标站
 ```
 
@@ -61,6 +64,55 @@ python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels
 `--scope` 也不是装饰：**G3/G4 只在同一 scope 内累计**。两个站点的拦截率不可比，
 混算时酒店那条 25% 会把火车票的 1.0 序列打断，G3 永不触发。`--scope` 与 junit 口径
 不一致会 exit 2，不会「忘了改一处还照常出数」。
+
+### 本地可见调试（有头，仅本地）
+
+要看窗口就把它显示出来。一键入口：
+
+```bash
+scripts/run-headed.sh suites/hotels -m hotels
+scripts/run-headed.sh suites/thirdparty -m ui
+```
+
+脚本固定 `HEADED=1 HUMAN=1`，其余 pytest 参数原样透传。四个开关：
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `HEADED=1` | 有头启动，窗口真实显示在本机桌面 | 无头 |
+| `HUMAN=1` | 拟人节奏：逐字符输入、鼠标分步移动、动作之间随机停顿 | **未设时跟随 `HEADED`**（有头开、无头关） |
+| `HUMAN_SEED` | 固定停顿序列，便于复现时序问题 | 每次随机 |
+| `SLOWMO` | **额外**的全局固定延迟（毫秒），只在单个动作仍看不清时用 | 不启用 |
+
+两者会叠加，所以**默认不要同时用**：拟人已让操作看得清，`--slowmo` 只会把节奏变机械。
+看不清时再加 `SLOWMO=300`（或 `800`）。
+
+火车票轨道的页面对象**还没接拟人节奏**（本轮只做了酒店），所以想看慢动作要用 `SLOWMO=800`：
+
+```bash
+SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui
+```
+
+Linux 上缺少 `DISPLAY` / `WAYLAND_DISPLAY` 时，脚本直接报「当前环境看不到窗口」并退出 3，
+**不用 xvfb 冒充可见** —— 那样窗口不会真的出现，只会让人一直等一个不存在的窗口。
+
+#### 与 CI 的差异
+
+| 场景 | 浏览器 | 拟人 | 说明 |
+|---|---|---|---|
+| 本地 `scripts/run-headed.sh` | 有头 | 开 | 只为人工看清过程 |
+| CI `hotels` | headless | 恒关（`HUMAN=0`） | 酒店在无头下正常，范围见 `docs/KNOWN-LIMITATIONS.md` K-05 |
+| CI `ui`（trains） | `xvfb-run -a` + `HEADED=1` | 恒关（`HUMAN=0`） | trains 无头下整站被 432 拦，见 K-05 |
+
+`HUMAN=0` 在 CI 里是**必须显式写**的：`HEADED=1` 会自动开启拟人，不写就等于开了。
+
+拟人只调**时间**，不碰 User-Agent / 自动化标记 / stealth 脚本；也**不因为被拦就调慢重试** ——
+被拦照旧记 `blocked` → `xfail`。三条边界写在 `utils/humanize.py` 文件头。
+
+> **已知未解（根因 ⚠️[未查实]）**：有头跑酒店时曾出现一次 180 秒超时（第 3 条参数化，
+> 进程被 `pytest-timeout` 杀掉，junit 未生成）。手上只有「同期截图里存在地理位置权限询问框」
+> 这一条旁证，**没做**「去掉 `permissions` 再跑」的对照，所以不归因到弹窗。之后加
+> `permissions: []` 并连跑两次均通过，但**一次通过不等于已修复**。
+> 再复现时的正确动作：单跑该条 + `--durations` 定位到具体阶段，不猜。
 
 ---
 
@@ -201,8 +253,12 @@ verdict: YELLOW   触发: G5
    编号化记录见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)。
 2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
 3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
-4. 目前只覆盖国内火车票查询；机票、酒店、登录态都没实现。
+4. 目前覆盖国内火车票查询 + 酒店搜索一期（目的地 / 日期 / 房间及住客 / 搜索四字段）；
+   机票、登录态未实现。
 5. 登录态一律不碰：本工程不登录、不提交订单、不进入支付流程。
+6. **无头模式下火车票站点整站被拦（HTTP 432 `whaleguard block`）。** 只作用于
+   `trains.ctrip.com`，酒店模块在无头下正常。CI 的 trains job 因此用 `xvfb-run -a` +
+   `HEADED=1`；本地怎么看窗口见「本地可见调试」一节。编号记录见 K-05。
 
 ---
 
