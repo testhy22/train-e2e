@@ -78,15 +78,19 @@ class HotelSearchPage(BasePage):
     def set_destination(self, city: str) -> None:
         """输入城市并从联想面板选第一项（第一条恒为「<城市>, 中国 城市」）。"""
         box = self.page.locator(self.DESTINATION)
-        box.click()
+        self.human.click(box)
         box.fill("")
-        box.press_sequentially(city, delay=settings.TYPE_DELAY_MS)
+        # 逐字符输入（每字符独立采样延迟）：fill 只发一次 input 事件，联想面板未必触发，
+        # 也不像人。详见 utils/humanize.py。
+        self.human.type_text(box, city)
 
         item = self.page.locator(self.SUGGEST_ITEM).first
         item.wait_for(state="visible")
-        item.click()
+        self.human.click(item)
         # 回填是异步的，等到值真的变了再返回；不 sleep。
         expect(box).to_have_value(re.compile(re.escape(city)))
+        # 人看完联想结果再动下一步。
+        self.human.read()
 
     # ------------------------------------------------------------ 日期
 
@@ -98,7 +102,7 @@ class HotelSearchPage(BasePage):
         """
         if self.page.locator(self.CAL_DAYS).count() > 0:
             return
-        self.form.locator("label", has_text=re.compile(rf"^{which}$")).first.click()
+        self.human.click(self.form.locator("label", has_text=re.compile(rf"^{which}$")).first)
         self.page.locator(self.CAL_DAYS).first.wait_for(state="visible")
 
     def _pick_day(self, target: date) -> None:
@@ -110,7 +114,10 @@ class HotelSearchPage(BasePage):
         block = self.page.locator(self.CAL_BLOCK).filter(
             has=self.page.locator(f"{self.CAL_TITLE}:text-is('{title}')")
         ).first
-        block.locator("li").filter(has_text=re.compile(rf"^{target.day}$")).first.click()
+        day = block.locator("li").filter(has_text=re.compile(rf"^{target.day}$")).first
+        self.human.click(day)
+        # 选完日人会看一下新日期，再动下一步。
+        self.human.read()
 
     def set_checkin(self, target: date) -> None:
         self._open_calendar("入住")
@@ -128,7 +135,7 @@ class HotelSearchPage(BasePage):
     def close_calendar(self) -> None:
         """收起日历面板（面板展开时会盖住下方控件）。"""
         if self.page.locator(self.CAL_DAYS).count() > 0:
-            self.page.keyboard.press("Escape")
+            self.human.press("Escape")
             expect(self.page.locator(self.CAL_DAYS)).to_have_count(0)
 
     # ------------------------------------------------------------ 房间及住客
@@ -158,7 +165,7 @@ class HotelSearchPage(BasePage):
                 "无法把人数压回低于房间数的状态"
             )
 
-        self.form.locator(self.ROOM_GUEST).first.click()
+        self.human.click(self.form.locator(self.ROOM_GUEST).first)
         popup = self._popup()
         plus = popup.locator(self.PLUS)
         expect(plus).to_have_count(3)          # 房间 / 成人 / 儿童
@@ -169,9 +176,9 @@ class HotelSearchPage(BasePage):
             if delta < 0:
                 raise ValueError(f"set_rooms 只支持增加，收到 {target} < 默认值 {low}")
             for _ in range(delta):
-                plus.nth(index).click()
+                self.human.click(plus.nth(index))
 
-        self.page.locator(self.DONE).first.click()
+        self.human.click(self.page.locator(self.DONE).first)
 
     # ------------------------------------------------------------ 提交
 
@@ -186,7 +193,9 @@ class HotelSearchPage(BasePage):
         with self.page.expect_request(
             lambda req: "/hotels/list" in req.url, timeout=settings.NAV_TIMEOUT_MS
         ) as info:
-            self.form.locator(self.SEARCH_BTN).first.click()
+            # 点搜索前停一下：真人填完表单通常要扫一眼再提交。
+            self.human.think()
+            self.human.click(self.form.locator(self.SEARCH_BTN).first)
         return parse_qs(urlparse(info.value.url).query)
 
     # ------------------------------------------------------------ 结果侧取值

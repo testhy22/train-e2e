@@ -3,8 +3,12 @@
 规则：除本文件外，任何地方不得出现硬编码的 URL、路径或超时数值。
 
 关于 BASE_URL：默认指向真实站点，可用环境变量覆盖（本地调试、换目标站都只改这一处）。
-本工程不使用任何反检测手段：不伪装 UA、不改自动化标记、不做规避识别的随机节奏。
+本工程不使用任何反检测手段：不伪装 UA、不改自动化标记、不按「哪里被拦」调参重试。
 被风控拦下是一等结果（blocked → xfail），不是要被消灭的障碍。
+
+唯一的例外是有明确边界的：`HUMAN` 拟人节奏（见文件末「拟人节奏」段与 utils/humanize.py）。
+它只改**时间**不改**身份**，用途是让人在有头模式下看得清操作过程；它**不是**规避手段，
+也不允许因为被拦而调慢重试。
 """
 
 from __future__ import annotations
@@ -63,6 +67,16 @@ TRACE_MODE = "retain-on-failure"
 TYPE_DELAY_MS = 80
 # 单次输入整串的总时长上限（秒），防止长城市名把用例拖慢。
 TYPE_MAX_TOTAL_S = 3.0
+
+# ---------------------------------------------------------------- 拟人节奏
+
+# 开关三态（解析逻辑在 utils/humanize.human_enabled）：
+#   HUMAN=1 强制开 / HUMAN=0 强制关 / 未设 ⇒ 跟随 HEADED（有头开、无头关）
+# 为什么默认跟随 HEADED：无头跑没有观众，慢只拖长反馈周期；CI 因此永远不会意外变慢。
+HUMAN_RAW = os.getenv("HUMAN", "").strip()
+
+# 固定随机种子 ⇒ 每次跑同样的停顿序列，便于复现时序问题。0 / 空 表示每次随机。
+HUMAN_SEED = int(os.getenv("HUMAN_SEED", "0") or 0) or None
 
 
 class ConfigError(RuntimeError):
