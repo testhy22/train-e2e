@@ -38,6 +38,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: 数据质量校验（先于浏览器）
+        # 纯离线、约 2 秒。数据配错要在装浏览器之前就红 ——
+        # 否则表现为「某条 UI 用例莫名失败」，查半天才发现是 yaml 里一个数字写错。
+        run: python -m pytest tools/tests/test_case_data.py -q
+
       - name: 安装浏览器
         run: python -m playwright install --with-deps chromium
 
