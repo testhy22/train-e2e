@@ -19,6 +19,9 @@ venv/
 .env
 .env.*
 !.env.example
+# 登录态 storageState：内容是**明文会话 cookie**，等价于账号凭据，绝不入库。
+# 目录由 scripts/setup_auth.py 自己创建（含 .gitkeep 也不放，避免目录结构被误当成约定）。
+config/auth/
 
 # ---- 编辑器 / 系统 ----
 .vscode/

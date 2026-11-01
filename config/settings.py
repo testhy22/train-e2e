@@ -50,6 +50,45 @@ DEFAULT_TIMEOUT_MS = int(os.getenv("DEFAULT_TIMEOUT_MS", "15000"))
 EXPECT_TIMEOUT_MS = int(os.getenv("EXPECT_TIMEOUT_MS", "5000"))
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "30000"))
 
+# ---------------------------------------------------------------- 登录态
+#
+# 2026-11-01 用户裁决（「立即推进微信快捷登录」）后新增。这一节成立的前提是三条边界
+# 同时守住，缺一条它就退化成「拿凭据换通过率」，与文件头的 D 决策冲突：
+#   1. 凭据只由**真人扫码**产生。工程不代填账号密码、不模拟扫码、不碰验证码。
+#   2. 凭据绝不入库、绝不进 CI。config/auth/ 在 .gitignore 里；CI 没有这个文件时
+#      auth 轨道固定 skip，不靠 secret 注入（K-04 已判过「CI 无法安全持有凭据」）。
+#   3. 不因被拦而换账号、换 state 重试。被拦是结果，不是要消灭的障碍。
+# 边界与缺口记录见 docs/KNOWN-LIMITATIONS.md 的 K-07。
+
+# 登录态文件。文件存在 ≠ 已登录；内容是否还有效只有真跑一次才知道。
+AUTH_STATE_FILE = PROJECT_ROOT / "config" / "auth" / "ctrip_state.json"
+
+# 「建议重扫」阈值（天）。超阈值只告警、不阻断：mtime 只能说明「存了多久」，
+# 说明不了「还有没有效」，拿它判失效会造出假失败。
+AUTH_STATE_TTL_DAYS = int(os.getenv("AUTH_STATE_TTL_DAYS", "7"))
+
+# 是否给**所有**用例的 context 挂 storage_state。默认 False，原因具体：
+# 酒店轨道现有断言依赖「匿名态」这个实验条件——提交路径落 passport（K-04）、
+# 落点写进报告（test_hotel_search.py:84-90）。全局挂上登录态会把实验条件改掉，
+# 报告里的 login_wall= 从 True 变 False，读报告的人会以为登录墙放开了。
+# 要全局生效，显式设 AUTH_GLOBAL=1，并自己承担上面两个语义变化。
+AUTH_GLOBAL = os.getenv("AUTH_GLOBAL", "").strip() == "1"
+
+# 营销浮层自动关闭开关。2026-11-01 截图证据：www.ctrip.com 首页底部
+# 「周周享低价 领券更划算」浮层带一张**营销二维码**，它既挡底部点击，
+# 又会让「二维码可见」类断言假绿。默认开；OVERLAY_AUTOCLOSE=0 关掉。
+OVERLAY_AUTOCLOSE = os.getenv("OVERLAY_AUTOCLOSE", "1").strip() != "0"
+
+
+def auth_state_path() -> Path:
+    """登录态文件路径。
+
+    只返回路径，**不判断存在性** —— 存在性判定归 conftest 的 auth_state 夹具，
+    那里要负责「缺文件时 skip 而不是 fail」（否则 CI 永久红）。
+    """
+    return AUTH_STATE_FILE
+
+
 # ---------------------------------------------------------------- 浏览器
 
 HEADLESS = os.getenv("HEADED") != "1"

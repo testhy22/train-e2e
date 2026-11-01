@@ -1,4 +1,4 @@
-"""Page Object 基类：只放「任何页面都会用到」的四件事。
+"""Page Object 基类：只放「任何页面都会用到」的五件事。
 
 1. 有界等待 —— 等待状态一律 expect / 自动等待，没有 time.sleep。
    **唯一允许的固定停顿**来自 `utils/humanize.py` 的拟人节奏：它只发生在动作之间、
@@ -6,6 +6,9 @@
 2. 风控识别 —— blocked 是一等结果：识别出来就抛 BlockedByAntiBot，交给上层转 xfail。
 3. 失败证据 —— 视口 + 全页截图，文件名取自 nodeid，能直接对回报告里那一条。
 4. 导航 —— 只做 goto + 载入状态等待，不做任何头部/指纹改写。
+5. 营销浮层 —— 导航后关掉站点自己弹的领券条（`utils/overlay.py`）。
+   挂在这里而不是挂成 autouse fixture：autouse 一旦请求 `page`，数据层单测也会被
+   拉起来起一个浏览器，代价远大于收益。导航是所有 UI 用例的必经点，挂这里最省。
 
 不做什么（重要）：
   不改 User-Agent、不改 navigator.webdriver、不注入 stealth 脚本、不按「哪里被拦」调节奏。
@@ -27,6 +30,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
 from utils.humanize import Humanizer, human_enabled
+from utils.overlay import dismiss_promo_overlays
 
 # ---------------------------------------------------------------- 风控特征
 
@@ -101,6 +105,9 @@ class BasePage:
         self.base_url = (base_url or settings.base_url()).rstrip("/")
         self.page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
         self.page.set_default_navigation_timeout(settings.NAV_TIMEOUT_MS)
+        # 每次导航后关浮层的处理记录。用例可以读它写进报告，
+        # 用来回答「浮层到底关掉没有」—— 不然只能靠猜。
+        self.overlay_log: list[str] = []
         # 拟人节奏：默认跟随 HEADED（有头开、无头关），可用 HUMAN=1/0 强制覆盖。
         # HUMAN_SEED 固定后每次跑同一套节奏，便于复现时序问题；不设则每次随机。
         self.human = Humanizer(
@@ -116,6 +123,19 @@ class BasePage:
         url = self.base_url + ("" if path == "/" else path)
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
+        self.dismiss_overlays()
+
+    def dismiss_overlays(self) -> list[str]:
+        """关掉站点自己的营销浮层。
+
+        为什么不失败：浮层是站点随时可加可撤的东西，不该由它决定用例红绿。
+        真挡住操作时，红的是被挡的那一步（有截图），不是这里。
+        """
+        if not settings.OVERLAY_AUTOCLOSE:
+            self.overlay_log = []
+            return self.overlay_log
+        self.overlay_log = dismiss_promo_overlays(self.page)
+        return self.overlay_log
 
     def wait_ready(self) -> None:
         """等 load 事件。用有界等待，超时即抛，不留裸 sleep。"""

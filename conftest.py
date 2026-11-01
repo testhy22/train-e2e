@@ -14,9 +14,12 @@
 from __future__ import annotations
 
 import contextlib
+import time
+import warnings
+from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Browser, BrowserContext, Page
 
 from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
@@ -36,12 +39,16 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
     scope=ui_hotels → hotels 轨道（www.ctrip.com 首页酒店模块），账本里独立一条序列
     scope=ui        → 其余浏览器用例（火车票），账本里另一条序列
+    scope=ui_auth   → 登录态轨道（2026-11-01 新增）。**刻意不并入上面两条**：
+                      它依赖一份人工扫码产生的凭据，CI 里永远 skip，
+                      混进任何一条 ratio 序列都会让分母变成「看有没有扫码」。
     scope=unit      → 数据层单测，门禁必须拒收
 
     **为什么按标记分轨而不是共用一个 ui**（裁决 2026-11-01）：两条轨道打的是
     两个站点，拦截率不可比。共用一个 scope 时，酒店那条 25% 会把火车票的
     1.0 序列打断——G3（连续 3 次 ≥0.3）和 G4（连续 7 天 ≥0.1）会跨轨道串味。
     标记优先取 `hotels`：酒店用例同时带 `ui`（也算浏览器用例），必须先判细分的那条。
+    标记优先级从高到低：auth > hotels > ui > unit（越细分越靠前）。
 
     为什么不用目录名 / classname 判断：junit 的 classname 是 rootdir 相对路径，
     在别的 rootdir 下跑一次就变；`user_properties` 是跟着用例走的，与调用方式无关。
@@ -49,7 +56,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     `<properties><property name="scope" value="ui"/></properties>`，pass / xfail / fail 三种结果都写。
     """
     for item in items:
-        if item.get_closest_marker("hotels"):
+        if item.get_closest_marker("auth"):
+            scope = "ui_auth"
+        elif item.get_closest_marker("hotels"):
             scope = "ui_hotels"
         elif item.get_closest_marker("ui"):
             scope = "ui"
@@ -82,7 +91,7 @@ def browser_context_args(browser_context_args):
     让失败原因从「站点行为」变成「弹窗挡路」。空列表 = 预先拒绝，等价于用户点「不允许」，
     对站点的可见结果与用户拒绝完全一致。
     """
-    return {
+    args = {
         **browser_context_args,
         "viewport": settings.VIEWPORT,
         "locale": settings.LOCALE,
@@ -90,6 +99,101 @@ def browser_context_args(browser_context_args):
         "base_url": settings.base_url(),
         "permissions": [],
     }
+    if settings.AUTH_GLOBAL and settings.auth_state_path().exists():
+        # 默认关，理由见 config/settings.py 的 AUTH_GLOBAL 注释。
+        # 文件不存在时静默跳过：全局挂载不该因为缺一份本地凭据就让所有用例炸。
+        args["storage_state"] = str(settings.auth_state_path())
+    return args
+
+
+# ---------------------------------------------------------------- 登录态轨道（2026-11-01）
+
+@pytest.fixture(scope="session")
+def auth_state() -> Path:
+    """登录态文件路径；缺失就 skip 整条 auth 轨道。
+
+    为什么是 skip 不是 fail：这份文件由**真人扫码**产生，CI 里永远不会有
+    （config/settings.py 的「登录态」段已写明凭据不进 CI）。用 fail 会让 main 上
+    永久挂一条红，红的原因与代码质量无关 —— 那种红最终必然被无视，
+    被忽视的门禁等于没有。
+
+    为什么用 known-limit 前缀而不是 blocked：这不是「对方拦我们」，
+    是我们自己缺一份本地凭据。blocked 会计入 ratio，known-limit 不进分母。
+    """
+    path = settings.auth_state_path()
+    if not path.exists():
+        pytest.skip(
+            "known-limit: AUTH-01 未找到登录态文件 "
+            f"{path.relative_to(settings.PROJECT_ROOT)}；"
+            "先在有头环境运行 python scripts/setup_auth.py"
+        )
+    return path
+
+
+@pytest.fixture(scope="session")
+def auth_state_age_days(auth_state: Path) -> float:
+    """state 文件已存放的天数。只用于提示，绝不作为失效判据。"""
+    return (time.time() - auth_state.stat().st_mtime) / 86400
+
+
+@pytest.fixture
+def auth_context(
+    browser: Browser,
+    auth_state: Path,
+    auth_state_age_days: float,
+    browser_context_args: dict,
+    request: pytest.FixtureRequest,
+) -> BrowserContext:
+    """带登录态的独立 context，只给 `@pytest.mark.auth` 的用例用。
+
+    为什么独立开 context、而不是给全局 `page` 挂 storage_state：
+    酒店轨道的断言依赖「匿名态」这个实验条件（提交路径落 passport、落点写进报告），
+    混进登录态就把条件改了，报告里 `login_wall=` 会从 True 变 False ——
+    读报告的人会以为登录墙放开了，而不是我们换了张脸。
+    要全局生效只能显式设 AUTH_GLOBAL=1，并自己承担上面这个语义变化。
+    """
+    context = browser.new_context(
+        **{**browser_context_args, "storage_state": str(auth_state)}
+    )
+
+    stale = auth_state_age_days > settings.AUTH_STATE_TTL_DAYS
+    detail = (
+        f"文件：{auth_state.name}\n"
+        f"已存放：{auth_state_age_days:.1f} 天（建议阈值 {settings.AUTH_STATE_TTL_DAYS} 天）\n"
+        f"超阈值：{'是 —— 只提示，不判失效' if stale else '否'}"
+    )
+    request.node.add_report_section("setup", "登录态", detail)
+
+    if stale:
+        # 过期只告警：mtime 说明「存了多久」，说明不了「还有没有效」，
+        # 拿它判失效会造出假失败。真失效时下面的断言会红，那才是证据。
+        warnings.warn(
+            f"登录态已存放 {auth_state_age_days:.1f} 天，超过建议阈值 "
+            f"{settings.AUTH_STATE_TTL_DAYS} 天；若断言红，先重跑 scripts/setup_auth.py",
+            stacklevel=2,
+        )
+
+    yield context
+    context.close()
+
+
+@pytest.fixture
+def auth_page(auth_context: BrowserContext) -> Page:
+    """登录态 context 里的页面。"""
+    page = auth_context.new_page()
+    page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
+    yield page
+    page.close()
+
+
+@pytest.fixture
+def auth_base_page(auth_page: Page) -> BasePage:
+    """登录轨道的页面对象，指向 www.ctrip.com。
+
+    用 hotel_base_url() 而不是 base_url()：登录入口在 www 顶部导航
+    （2026-11-01 用户截图确认），火车票站 trains.ctrip.com 的登录入口未取证。
+    """
+    return BasePage(auth_page, base_url=settings.hotel_base_url())
 
 
 @pytest.fixture

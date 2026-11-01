@@ -230,8 +230,15 @@ verdict: YELLOW   触发: G5
 2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
 3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
 4. 目前覆盖国内火车票查询 + 酒店搜索一期（目的地 / 日期 / 房间及住客 / 搜索四字段）；
-   机票、登录态未实现。
-5. 登录态一律不碰：本工程不登录、不提交订单、不进入支付流程。
+   机票未实现；登录态见第 5 条。
+5. **登录态分两条轨**（2026-11-01 裁决变更，此前是「一律不碰」）：
+   - **匿名轨**（火车票 `suites/thirdparty`、酒店 `suites/hotels`）：仍然不登录、
+     不提交订单、不进入支付流程。这两条轨道的全部断言都以「匿名访问」为前提。
+   - **`auth` 轨**（`suites/auth`，marker `auth`，scope `ui_auth`）：用一份
+     **人工扫码产生、绝不入库**的 storageState 验证「手上这份会话还能不能用」。
+     它不碰匿名轨的任何断言，也不进 CI —— 缺 `config/auth/ctrip_state.json` 时
+     固定 `skip("known-limit: AUTH-01 …")`，不进分母。
+   边界、缺口与取证状态见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) 的 K-07。
 6. **无头模式下火车票站点整站被拦（HTTP 432 `whaleguard block`）。** 只作用于
    `trains.ctrip.com`，酒店模块在无头下正常。CI 的 trains job 因此用 `xvfb-run -a` +
    `HEADED=1`；本地怎么看窗口见「本地可见调试」一节。编号记录见 K-05。

@@ -43,7 +43,7 @@
 | 取证 | 2026-11-01，`reports/probe_www_hotels_03.json`（提交后落点）、`reports/probe_www_hotels_04.json`（直开 list URL 亦被拦） |
 | 为什么不绕过 | 登录 / 复用 cookie 属于拿用户凭据绕开频率与身份限制，与 D 决策（零反检测、不复用 cookie）冲突，且 CI 无法安全持有凭据 |
 | 影响 | 一期**不断言结果列表渲染**，改断言「提交时真实发出的 `/hotels/list` 参数」（日期/晚数/房间人数/城市），这是页面自己生成的证据；`test_result_list_renders` 标 `skip("known-limit: K-04 …")`，不进分母 |
-| 保留的契约测试 | `test_login_wall_is_global` 断言「直开 list URL 仍被接管」。它一旦变绿，说明登录墙放开，本条目可销号、列表断言可恢复 |
+| 保留的契约测试 | `test_list_page_renders_with_full_params`（`suites/hotels/tests/test_hotel_search.py`）。断言「full 参数 + 匿名直开 list 能出卡片」。**本条原先写的是 `test_login_wall_is_global`（断言直开必被拦），实测一跑就红**——按 `reports/probe_www_hotels_06.json` 的事实替换：登录墙挂在「参数完整性 + 会话状态」，不是「列表页不可访问」。2026-11-01 核对时本行仍引用旧名，已按代码实际内容更正 |
 | 销号条件 | `test_login_wall_is_global` 连续 3 天在 CI 中失败（即不再被接管），且能稳定取到酒店卡片 ≥1 条 |
 | 二期方向 | 酒店级别、关键词字段；儿童年龄控件；有合法登录态的独立轨道（需另立决策，不在本期） |
 | 相关现场 | 2026-11-01 有头运行曾停在本登录墙并超时，见 K-06。**该画面不作为超时归因** |
@@ -80,3 +80,18 @@
 | 复现时才做的对照 | ① `--durations=10` 定位慢在哪一步；② 去掉 `permissions: []` 再跑一次（排除 geolocation 预拒绝相关）。命令见 PR #1 §6。**未拿到这两组对照前不下结论、不写「已修复」** |
 | 为什么暂不归档为「对方页面行为」 | 没定位就不给归因。若最终证实是站点侧偶发（登录墙重定向叠加慢加载），再按对方页面行为归档 |
 | 销号条件 | 复现 ≥1 次且拿到上面两组对照、定位到具体环节并修掉；或连续 20 次跑绿证明不可复现，改为「已观察、暂不可复现」并保留记录（不删本条） |
+
+## K-07 登录态轨道（`auth`）—— 会话复用可用，但「登录功能本身」未验证
+
+| 项 | 内容 |
+|---|---|
+| 起因 | 2026-11-01 裁决变更：「立即推进微信快捷登录」的自动化。README 此前写的是「登录态一律不碰」，本条登记这次变更的边界，不是把旧结论悄悄改掉 |
+| 已实现 | `scripts/setup_auth.py`（人工扫码一次，存 `config/auth/ctrip_state.json`）+ `suites/auth`（3 条用例，marker `auth`、scope `ui_auth`）+ `utils/auth.py`（采集与验证共用同一份判据，避免两处漂移） |
+| 能证明什么 | 「这份会话还能用」：加载 state 后访问 www.ctrip.com，顶部「注册」消失、头像区可见。这是**唯一**有画面证据的判据 |
+| **不能**证明什么 | ① 登录流程本身（输账号 / 验证码 / 扫码成功）一次都没跑过；② 微信授权页的任何 DOM —— 本项目**没有任何一次实测取证**，外部方案里 `get_by_role("button", name="允许")`、`a[class*='weixin']` 之类全部标 `⚠️[未查实]`；③ `trains.ctrip.com` 与 `www.ctrip.com` 登录态是否互通，未查实 |
+| 与匿名轨的隔离 | 三条硬隔离：scope 独立（`ui_auth`，不并入 ui / ui_hotels 的 ratio 序列）；context 独立（匿名用例仍匿名，K-04 的「提交路径落 passport」实验条件不被改）；缺文件时 `skip("known-limit: AUTH-01 …")` 而非 fail（不进分母，不让 CI 永久红） |
+| 凭据边界 | state 是**明文会话 cookie**，等价账号凭据。`config/auth/` 已进 `.gitignore`；不进 CI、不进 secret；不因被拦而换账号重试。谁要把 state 放进 CI secret，等于同时推翻 K-04「CI 无法安全持有凭据」的判断，必须重新裁决 |
+| 已实测的坑① | 首页底部「周周享低价 / 领券更划算」浮层带一张**营销二维码**（2026-11-01 截图证据），会让「二维码可见」类断言假绿。`utils/overlay.py` 已在 `BasePage.goto` 后自动关它，`OVERLAY_AUTOCLOSE=0` 可关 |
+| 已实测的坑② | 按窗口标题「微信」判断 PC 微信会**误命中**：同一次 `EnumWindows` 里 Chrome 窗口标题也含「微信」。`utils/wechat.py` 改用类名 `Qt51514QWindowIcon` 作主判据，标题只做弱兜底 |
+| 未完成 | `test_submit_then_list_renders`（`suites/hotels`）仍是 `skip`。它有登录态后**可能**可以启用，但「带 state 跑酒店提交路径是否还落 passport」这次没验证，别默认它能绿 |
+| 销号条件 | 不需要销号：这是新增能力，不是限制。真要退场，删 `suites/auth` + `scripts/setup_auth.py` + `config/settings.py` 的「登录态」段即可，其余代码不依赖它 |
