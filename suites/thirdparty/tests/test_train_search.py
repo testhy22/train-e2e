@@ -53,7 +53,6 @@ def test_train_search(case, page, blocked_guard, widget_guard, request):
         )
 
         items = train.result_items()
-        numbers = train.item_train_numbers(items)
 
         # 结构层：日期真的生效（URL 里必须是目标日期，否则后面的结果没有意义）
         assert train.url_depart_date() == case.depart_date, (
@@ -66,9 +65,28 @@ def test_train_search(case, page, blocked_guard, widget_guard, request):
             f"少于 min_results={case.min_results}"
         )
 
-        # 内容层：车次号可解析且覆盖率达标
-        coverage = len(numbers) / len(items) if items else 0
-        assert numbers, f"结果里没有任何形如 G6025 的车次号，前三条文本：{[i.inner_text()[:40] for i in items[:3]]}"
+        # 内容层：车次号可解析且覆盖率达标。
+        # 分母扣掉「中转/换乘」卡片 —— 它们由两段拼成，结构上没有单一车次号
+        # （2026-11-01 实测：60 条里 5 条是这种卡）。阈值仍是 90%，没有放宽；
+        # 但要同时断言这些卡片确实带换乘信息，不能靠「识别成中转」把垃圾条目排除掉。
+        transfers = [i for i in items if train.is_transfer_item(i)]
+        point_to_point = [i for i in items if not train.is_transfer_item(i)]
+        for card in transfers:
+            assert "换乘" in card.inner_text(), "被判定为中转的卡片里没有换乘信息，判定口径有误"
+
+        numbers = train.item_train_numbers(point_to_point)
+        coverage = len(numbers) / len(point_to_point) if point_to_point else 0
+        request.node.add_report_section(
+            "call",
+            "车次号解析",
+            f"条目 {len(items)} 条（点到点 {len(point_to_point)} / 中转 {len(transfers)}）\n"
+            f"抽出车次号 {len(numbers)} 条，覆盖率 {coverage:.1%}\n"
+            f"前 5 个车次号：{numbers[:5]}",
+        )
+        assert numbers, (
+            f"结果里没有任何车次号，前三条文本：{[i.inner_text()[:40] for i in point_to_point[:3]]}"
+        )
         assert coverage >= TRAIN_NO_COVERAGE, (
-            f"能抽出车次号的条目占比 {coverage:.0%}，低于 {TRAIN_NO_COVERAGE:.0%}"
+            f"点到点条目里能抽出车次号的占比 {coverage:.0%}"
+            f"（{len(numbers)}/{len(point_to_point)}），低于 {TRAIN_NO_COVERAGE:.0%}"
         )
