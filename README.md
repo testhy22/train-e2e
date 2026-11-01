@@ -99,6 +99,11 @@ python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels
 
 门禁退出码：`0` 绿/黄，`1` 红，`2` 口径不成立。
 
+**运行口径（WAF，K-05）**：`trains.ctrip.com` 与 `flights.ctrip.com` 两个子域在**无头**下会被
+whaleguard 拦截（HTTP 432 → 记 `blocked → xfail`，是已知外部限制不是失败）。要真实验证这两条
+轨道请 `HEADED=1`（本地 `scripts/run-headed.sh`，CI `xvfb-run`）；酒店轨（`www.ctrip.com`）无头
+不受影响。2026-11-02 复验：同登录态下无头 8 xfailed / `HEADED=1 HUMAN=0` 8 passed。
+
 `-m ui` / `-m hotels` 不是装饰：不带它跑出来的 junit 里混着 27 条数据层单测，
 门禁会直接判「口径混算」并拒绝出数（见 `docs/BLOCKED-GATE.md` §1）。
 
@@ -452,7 +457,7 @@ export ALLURE_BIN="/path/to/allure/bin/allure"
 
 ## 十二、登录态自检（e2e 轨的前置闸门）
 
-`suites/e2e/tests/test_login_state.py`，1 条，`-m e2e` 轨现在共 **13 条**。
+`suites/e2e/tests/test_merged_login_state.py`，1 条，`-m e2e` 轨现在共 **13 条**。
 
 它解决的是一个真实的信息缺口：那 12 条搜索用例断言的是「填表 → 提交 → 出结果」，
 **匿名态同样能过**（2026-11-01 之前匿名跑就是绿的）。所以「12 passed」只证明

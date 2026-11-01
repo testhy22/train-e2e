@@ -65,6 +65,7 @@
 |---|---|
 | 现象 | `trains.ctrip.com` 用 headless 打开时返回 **HTTP 432**，正文只有 17 字符 `whaleguard block`，标题为空；同一分钟改成有头则是 **200**、正文 953 字符、标题正常 |
 | 取证 | 2026-11-01 01:38 与 14:2x 两次独立对照。第二次实测：`headless=False status=200 正文=953字符 耗时=1.0s` / `headless=True status=432 正文=17字符 耗时=2.7s`。累计 headless 7/7 被拦、headful 5/5 正常 |
+| 复验 | 2026-11-02 00:07，e2e 轨单变量对照（同登录态，仅切 `HEADED`）：`-k "trains or flights"`（3 火车 + 5 机票）headless → **8 xfailed**（`waf_block` whaleguard，38s）；`HEADED=1 HUMAN=0` → **8 passed / 0 xfail**（194s，log `reports/logs/e2e_chain_headed_tf.log`）。**范围修正**：`flights.ctrip.com` 无头同样被拦、有头正常 —— 本条范围应读作「trains **与 flights** 子域」，此前「只作用于 trains」的说法不完整 |
 | **范围（重要）** | **只作用于 trains 子域，不是整站。** `www.ctrip.com` 的酒店模块在 headless 下正常出结果：2026-11-01 三份 junit 逐条一致（`00:43` headless、`01:21` headless、`01:43` headed 均 3 passed）。曾把这条写成「无头模式整站被拦」，是错的，已更正 |
 | 为什么不是缺陷 | 站点对无头浏览器的识别，与本工程代码无关。**不通过改 UA / 注入 stealth 脚本 / 随机化启动参数去绕** —— 那是把自己变成反检测工具 |
 | 影响 | ① CI 的 trains job 改 `xvfb-run -a` + `HEADED=1`（虚拟屏让 Chromium 能以有头模式启动，不改身份、不改断言）；② hotels job **维持 headless**，不为此付有头的成本；③ 本地调试用 `scripts/run-headed.sh` |
