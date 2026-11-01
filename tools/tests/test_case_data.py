@@ -30,7 +30,9 @@ ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 SENSITIVE = re.compile(r"(\b1[3-9]\d{9}\b|\b\d{17}[\dXx]\b|\b\d{15}\b)")
 
 # expected 的**闭集**：只允许用例真的会消费的键。写进来却没人读 = 会漂的第二个真相。
-HOTEL_EXPECTED_KEYS = {"city_id", "city_display"}
+# 酒店的 display 文案**不在**闭集里：段数随城市变（广州是「城市, 省, 中国」），
+# 落进数据就是把会变的东西钉成预期；断言只做「包含城市中文名」，中文名来自输入 city。
+HOTEL_EXPECTED_KEYS = {"city_id"}
 TRAIN_EXPECTED_KEYS = {"http_status", "title_contains"}
 
 
@@ -79,16 +81,7 @@ def test_hotel_cases_are_valid():
         city_id = case.expected.get("city_id")
         assert isinstance(city_id, int) and not isinstance(city_id, bool) and city_id > 0, (
             f"{case.id}: expected.city_id 必须是正整数（站点侧城市 id，"
-            f"实测见 reports/probe_city_id.json），收到 {city_id!r}"
-        )
-        city_display = case.expected.get("city_display", "")
-        assert city_display.startswith(case.city), (
-            f"{case.id}: expected.city_display 应以城市名开头，收到 {city_display!r}"
-        )
-        # 只到这里为止：**不**断言 display 的完整格式。实测（2026-11-01）
-        # 上海/北京 是「城市, 中国」，广州是「城市, 省, 中国」。
-        assert "中国" in city_display, (
-            f"{case.id}: expected.city_display 应含「中国」，收到 {city_display!r}"
+            f"实测见 reports/probe_city_id.py），收到 {city_id!r}"
         )
 
 

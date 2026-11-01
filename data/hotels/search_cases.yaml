@@ -11,11 +11,13 @@
 #   tags                `-k` 过滤用，必填且非空
 #   expected            外部可观测的预期，**只放无法由输入直接推出的东西**
 #     city_id           提交时 /hotels/list 的 `city` 参数（**实测值**，2026-11-01 探针
-#                       reports/probe_city_id.json）。城市名 → id 的映射是站点侧口径，
+#                       reports/probe_city_id.py）。城市名 → id 的映射是站点侧口径，
 #                       不是我们能推出来的，所以只能记下来。
-#     city_display      同一请求的 `display` 参数，**只作参考文案**。断言不复用它的完整值：
-#                       实测 上海/北京 是「城市, 中国」，广州是「城市, 省, 中国」——
-#                       站点按行政层级拼，写死格式早晚会误红。
+#
+# 为什么 expected 里**不**放 display 文案：
+#   实测（2026-11-01）上海/北京 是「城市, 中国」，广州是「城市, 省, 中国」——
+#   站点按行政层级拼，段数随城市变。把完整文案落进数据，等于把一个会变的东西
+#   钉成预期；断言只做「包含城市中文名」，中文名本来就来自输入 city，不需要再抄一份。
 #
 # 为什么用偏移量而不是写死日期：
 #   写死的日期今天能跑、明天就是过去时，用例会红得没有信息量。与火车票同一原则。
@@ -43,7 +45,6 @@ cases:
     tags: [smoke, sh]
     expected:
       city_id: 2
-      city_display: 上海, 中国
 
   - id: bj-3n2r3a
     name: 北京-3晚2间3位
@@ -56,7 +57,6 @@ cases:
     tags: [smoke, bj]
     expected:
       city_id: 1
-      city_display: 北京, 中国
 
   - id: gz-1n1r2a
     name: 广州-1晚1间2位
@@ -69,5 +69,3 @@ cases:
     tags: [smoke, gz]
     expected:
       city_id: 32
-      # 广州是「城市, 省, 中国」——三段。写死成「广州, 中国」会与站点不符。
-      city_display: 广州, 广东, 中国
