@@ -1,0 +1,56 @@
+# 火车票冒烟用例数据
+#
+# 字段
+#   id                  用例标识：小写字母数字与 - _，**必须是 ASCII**（理由同酒店）
+#   name                中文名，只用于报告展示
+#   from_city/to_city   城市名，必须能命中目标站点的联想下拉
+#   depart_offset_days  相对今天的天数：下限 +3、上限 = 预售期（见 settings.MAX_PRESALE_DAYS）
+#   min_results         结果条目数下界
+#   expected_keyword    弱条件，只写进日志与报告，不参与 pass/fail
+#   tags                `-k` 过滤用
+#   expected            `http_status` 是硬预期：无头下该站返回 432，见 KNOWN-LIMITATIONS K-05，
+#                       所以这条断言只在有头 / CI(xvfb) 场景下才有意义
+#
+# 为什么用偏移量：写死日期明天就是过去时；车次查询的语义是「未来可取的车次」，
+# 日期落到当天且已过末班车，结果必然为空，用例红得毫无信息量。
+
+version: 1
+suite: trains
+marker: ui
+
+cases:
+  - id: sh-bj
+    name: 上海-北京 冒烟
+    from_city: 上海
+    to_city: 北京
+    depart_offset_days: 7
+    min_results: 1
+    expected_keyword: 车次
+    tags: [smoke, sh-bj]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: gz-sz
+    name: 广州-深圳 冒烟
+    from_city: 广州
+    to_city: 深圳
+    depart_offset_days: 10
+    min_results: 1
+    expected_keyword: 车次
+    tags: [smoke, gz-sz]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: hz-nj
+    name: 杭州-南京 冒烟
+    from_city: 杭州
+    to_city: 南京
+    depart_offset_days: 13
+    min_results: 1
+    expected_keyword: 车次
+    tags: [smoke, hz-nj]
+    expected:
+      http_status: 200
+      title_contains: 火车票

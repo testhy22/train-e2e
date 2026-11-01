@@ -8,7 +8,9 @@ from utils import data_loader
 from utils.data_loader import DataError, load_cases, param_ids
 
 TODAY = date(2026, 10, 31)
-YAML_PATH = "test_data/search_cases.yaml"
+# 2026-11-01 数据迁移：旧用例目录（113d30a 已删）→ data/trains/，并加了 version/cases 包装。
+# 本文件测的是解析器，包装的定位与版本校验在 tools/tests/test_case_data.py。
+YAML_PATH = "data/trains/smoke_cases.yaml"
 
 
 def write(tmp_path, body: str):
@@ -130,6 +132,24 @@ def test_broken_yaml_rejected(tmp_path):
         load_cases(write(tmp_path, "- id: [unclosed\n"), today=TODAY)
 
 
-def test_top_level_must_be_list(tmp_path):
-    with pytest.raises(DataError, match="非空列表"):
+def test_wrapped_without_version_rejected(tmp_path):
+    """有包装就必须有 version：没有版本号的格式以后没法和新格式区分开。"""
+    with pytest.raises(DataError, match="version 必须是 1"):
         load_cases(write(tmp_path, "cases: []\n"), today=TODAY)
+
+
+def test_top_level_must_be_list_or_wrapped(tmp_path):
+    with pytest.raises(DataError, match="顶层必须是列表或含 cases 的映射"):
+        load_cases(write(tmp_path, '"just a string"\n'), today=TODAY)
+
+
+def test_wrapped_format_is_accepted(tmp_path):
+    """version: 1 + cases: 包装要被接受 —— data/ 下的文件都是这个形状。"""
+    body = "version: 1\nsuite: trains\ncases:\n" + one()
+    cases = load_cases(write(tmp_path, body), today=TODAY)
+    assert [c.id for c in cases] == ["sh-bj"]
+
+
+def test_empty_cases_rejected(tmp_path):
+    with pytest.raises(DataError, match="没有任何用例"):
+        load_cases(write(tmp_path, "version: 1\ncases: []\n"), today=TODAY)

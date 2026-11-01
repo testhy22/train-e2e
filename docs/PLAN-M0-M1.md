@@ -287,3 +287,11 @@ M1-3 依赖 **Docker daemon 运行**（实测当前未启动）。M1-3 之前的
 4. **远端仓库**：`testhy22/train-e2e` 私有仓库，还是只本地 `git init` 不推远端？推的话我需要 SSH over 443 的既有配置
 
 M1 的代码改动全部落在这四点的答案范围内。这四点未定之前，我只做 M0（git 基线不依赖任何一项）。
+
+---
+
+> **注记（2026-11-01 追加，正文未改）**
+> 本文提到的 `test_data/` 目录已在提交 `113d30a` 删除。数据现在位于
+> `data/trains/smoke_cases.yaml` 与 `data/hotels/search_cases.yaml`（`version: 1` + `cases` 包装，
+> 统一入口 `utils/case_data.py`，可用 `CASE_DATA_DIR` 指向别的目录）。
+> 正文按迁移前的原貌保留，作为当时决策的记录；现状以代码为准。

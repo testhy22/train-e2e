@@ -76,6 +76,11 @@ def browser_context_args(browser_context_args):
 
     刻意不改的：user_agent（默认就是真实 Chromium UA）、任何 stealth 脚本、
     任何 AutomationControlled 相关启动参数。
+
+    `permissions: []` 是另一回事，它不伪装身份：有头模式会弹出「www.ctrip.com 想要
+    获取您的位置」这类原生权限询问框（2026-11-01 截图证据），弹窗在页面上会挡住点击目标，
+    让失败原因从「站点行为」变成「弹窗挡路」。空列表 = 预先拒绝，等价于用户点「不允许」，
+    对站点的可见结果与用户拒绝完全一致。
     """
     return {
         **browser_context_args,
@@ -83,6 +88,7 @@ def browser_context_args(browser_context_args):
         "locale": settings.LOCALE,
         "timezone_id": settings.TIMEZONE_ID,
         "base_url": settings.base_url(),
+        "permissions": [],
     }
 
 

@@ -1,13 +1,19 @@
 """Page Object 基类：只放「任何页面都会用到」的四件事。
 
-1. 有界等待 —— 没有 time.sleep，没有 page.wait_for_timeout，一律 expect / 自动等待。
+1. 有界等待 —— 等待状态一律 expect / 自动等待，没有 time.sleep。
+   **唯一允许的固定停顿**来自 `utils/humanize.py` 的拟人节奏：它只发生在动作之间、
+   只为了让人能看清，且**不得**用来等页面状态（那会退化回硬 sleep）。默认仅在有头模式开启。
 2. 风控识别 —— blocked 是一等结果：识别出来就抛 BlockedByAntiBot，交给上层转 xfail。
 3. 失败证据 —— 视口 + 全页截图，文件名取自 nodeid，能直接对回报告里那一条。
 4. 导航 —— 只做 goto + 载入状态等待，不做任何头部/指纹改写。
 
 不做什么（重要）：
-  不改 User-Agent、不改 navigator.webdriver、不注入 stealth 脚本、不做「规避识别」的
-  随机节奏。被风控拦下就是被拦下，工程上承认它、记录它、不假装通过。
+  不改 User-Agent、不改 navigator.webdriver、不注入 stealth 脚本、不按「哪里被拦」调节奏。
+  被风控拦下就是被拦下，工程上承认它、记录它、不假装通过。
+
+关于拟人节奏的边界（2026-11-01 用户要求「模拟人正常的速度操作」后新增）：
+  只调**时间**、不碰**身份**；只在有头模式默认开启；**不因被拦而调慢重试**。
+  三条任一被打破，它就变成了反检测手段 —— 见 `utils/humanize.py` 文件头的四条边界。
 """
 
 from __future__ import annotations
@@ -16,9 +22,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Locator, Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
+from utils.humanize import Humanizer, human_enabled
 
 # ---------------------------------------------------------------- 风控特征
 
@@ -93,6 +101,13 @@ class BasePage:
         self.base_url = (base_url or settings.base_url()).rstrip("/")
         self.page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
         self.page.set_default_navigation_timeout(settings.NAV_TIMEOUT_MS)
+        # 拟人节奏：默认跟随 HEADED（有头开、无头关），可用 HUMAN=1/0 强制覆盖。
+        # HUMAN_SEED 固定后每次跑同一套节奏，便于复现时序问题；不设则每次随机。
+        self.human = Humanizer(
+            page,
+            enabled=human_enabled(settings.HEADLESS, settings.HUMAN_RAW),
+            seed=settings.HUMAN_SEED,
+        )
 
     # ------------------------------------------------------------ 导航
 

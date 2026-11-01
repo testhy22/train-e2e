@@ -12,15 +12,18 @@
 1. 禁止把定位器和业务操作写在测试函数里；测试只做「编排 + 断言」，元素与交互封装在 `pages/`。
 2. **禁止用裸 `time.sleep()` / `page.wait_for_timeout()` 做同步等待**，一律用 Playwright
    自动等待或显式 `expect(...)` 条件等待。
-   —— 允许：`press_sequentially(delay=60~120)` 模拟输入节奏、`expect(locator).to_be_visible()`。
-3. 测试数据不得硬编码在测试文件内，全部写进 `test_data/*.yaml`。
+   —— 允许：`expect(locator).to_be_visible()`；以及 `utils/humanize.py` 的拟人节奏
+   （只在动作之间停顿，**不得**用来等页面状态，边界见该文件头）。
+3. 测试数据不得硬编码在测试文件内，全部写进 `data/**/*.yaml`，经 `utils/case_data.py` 加载。
 4. 失败必须留下证据：截图 + URL + title 写进报告；trace 用 `retain-on-failure`。
 5. 选择器优先语义定位（`get_by_role` / `get_by_placeholder` / `get_by_text`），避免层级 CSS。
 6. 城市输入优先 `fill()`；实测 `fill` 触发不了联想时才退到 `press_sequentially`，
    并在注释里写明「功能必要，非规避手段」。
 7. 每条用例可独立运行，不依赖前一条的状态。
 8. **不写任何反检测代码**：不改 UA、不加 `--disable-blink-features=AutomationControlled`、
-   不做以「规避识别」为目的的随机节奏。被拦就如实记录。
+   不注入 stealth 脚本、不按「哪里被拦」调参重试。被拦就如实记录。
+   拟人节奏（`HUMAN`）只调**时间**、不碰**身份**，用途是本地有头时让人看清操作；
+   它**不是**规避手段，CI 里恒关闭（`HUMAN=0`）。
 
 ---
 
@@ -31,7 +34,7 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium        # 需与 playwright 版本匹配，见「常见问题」
 
 python -m pytest                             # 全量（含 27 条数据层单测）
-HEADED=1 python -m pytest suites/thirdparty/tests/test_smoke.py    # 有头，本地调试
+scripts/run-headed.sh suites/hotels -m hotels    # 有头，本地看窗口（见下节）
 BASE_URL=https://your-site.example python -m pytest suites/thirdparty   # 换目标站
 ```
 
@@ -62,29 +65,54 @@ python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels
 混算时酒店那条 25% 会把火车票的 1.0 序列打断，G3 永不触发。`--scope` 与 junit 口径
 不一致会 exit 2，不会「忘了改一处还照常出数」。
 
+### 本地可见调试（有头，仅本地）
+
+```bash
+scripts/run-headed.sh suites/hotels -m hotels
+SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui     # trains 还没接拟人，要慢放
+```
+
+脚本固定 `HEADED=1 HUMAN=1`。四个开关（`HEADED` / `HUMAN` / `HUMAN_SEED` / `SLOWMO`）、
+Linux 无显示服务时的行为、与 CI 的差异表，全部在
+[`docs/HEADED-DEBUG.md`](docs/HEADED-DEBUG.md)。
+
+两条要点：
+
+- `HEADED=1` 会自动开拟人，**默认不要再叠加 `--slowmo`**，看不清再加 `SLOWMO=300/800`。
+- 拟人只调时间不碰身份，被拦照旧记 `blocked` → `xfail`，**不因为被拦就调慢重试**。
+
 ---
 
 ## 三、目录与职责
 
 ```
 config/settings.py          唯一配置出口：站点、超时、视口、预售期常量、证据目录
-pages/base_page.py          有界等待、风控识别（detect_block）、失败截图
+pages/base_page.py          有界等待、风控识别（detect_block）、失败截图、拟人原语入口
+pages/hotel_search_page.py  酒店页 POM：目的地/日期/房间住客/提交并抓请求参数
 pages/train_search_page.py  火车票页 POM：城市选择、日历选择、搜索、取结果状态
-utils/data_loader.py        读 YAML → 偏移量转日期 → parametrize 数据与 id
-test_data/search_cases.yaml 用例数据（只写「哪个区间、第几天、至少几条」）
-suites/thirdparty/tests/    track B：真站点
+utils/case_data.py          用例数据统一入口：data/ 定位、version 包装、CASE_DATA_DIR
+utils/hotel_data.py         酒店数据解析：偏移量+晚数 → 具体日期，字段校验
+utils/data_loader.py        火车票数据解析：偏移量 → 日期，预售期与 id 校验
+utils/humanize.py           拟人操作节奏（只调时间不碰身份，边界见文件头）
+data/hotels/search_cases.yaml  酒店用例数据
+data/trains/smoke_cases.yaml   火车票冒烟数据
+suites/hotels/tests/        track B：酒店首页模块
+  test_hotel_search.py      四字段搜索：断言提交时真实发出的 /hotels/list 参数
+suites/thirdparty/tests/    track B：火车票
   test_smoke.py             冒烟：只打开页面、检测 blocked、记录 title/URL
   test_train_search.py      功能：三层断言（结构 / 内容 / 辅助）
   test_calendar_widget.py   K-01 的活样本，故意 skip，用来说明 known-limit 口径
-  test_data_loader.py       数据层单测（27 项，不需要浏览器，不带 ui 标记）
+  test_data_loader.py       数据层单测（30 项，不需要浏览器，不带 ui 标记）
 suites/regression/          track A：容器靶站，空骨架，等 M1-3
 tools/blocked_gate.py       blocked 门禁判定器（规范：docs/BLOCKED-GATE.md）
 tools/ledger.py             ledger 记录的结构与校验
 tools/ledger_append.py      追加到 ops/metrics 分支并读回校验
-tools/tests/                门禁与账本自身的单测（35 项，不需要浏览器）
+tools/tests/                门禁、账本、拟人节奏、数据质量的单测（69 项，不需要浏览器）
 tools/probes/               一次性定位器探针（不参与测试运行，留作取证）
+scripts/run-headed.sh       本地可见调试入口（有头 + 拟人）
 docs/BLOCKED-GATE.md        判定规则的唯一来源
-docs/KNOWN-LIMITATIONS.md   K-01 / K-02 / K-03
+docs/HEADED-DEBUG.md        本地可见调试与用例数据目录（HEADED/HUMAN/SLOWMO/SEED、CASE_DATA_DIR）
+docs/KNOWN-LIMITATIONS.md   K-01 … K-05
 docs/locator-evidence/      探针结果 JSON 与拦截截图（定位器的取证来源）
 conftest.py                 浏览器上下文、scope 标记、blocked→xfail、known-limit→skip、失败取证
 ```
@@ -201,8 +229,12 @@ verdict: YELLOW   触发: G5
    编号化记录见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)。
 2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
 3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
-4. 目前只覆盖国内火车票查询；机票、酒店、登录态都没实现。
+4. 目前覆盖国内火车票查询 + 酒店搜索一期（目的地 / 日期 / 房间及住客 / 搜索四字段）；
+   机票、登录态未实现。
 5. 登录态一律不碰：本工程不登录、不提交订单、不进入支付流程。
+6. **无头模式下火车票站点整站被拦（HTTP 432 `whaleguard block`）。** 只作用于
+   `trains.ctrip.com`，酒店模块在无头下正常。CI 的 trains job 因此用 `xvfb-run -a` +
+   `HEADED=1`；本地怎么看窗口见「本地可见调试」一节。编号记录见 K-05。
 
 ---
 

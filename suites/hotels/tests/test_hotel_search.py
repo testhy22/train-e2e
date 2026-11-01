@@ -18,16 +18,17 @@ import re
 
 import pytest
 
-from config import settings
 from pages.hotel_search_page import HotelSearchPage
-from utils.hotel_data import load_cases
+from utils.case_data import case_ids, load_hotel_search_cases
 
 pytestmark = [pytest.mark.ui, pytest.mark.hotels]
 
-CASES = load_cases(settings.PROJECT_ROOT / "test_data" / "hotel_cases.yaml")
+# 数据在 data/hotels/search_cases.yaml（可用 CASE_DATA_DIR 覆盖）。
+# 用例只读 case 并执行，不在这里写任何数字。
+CASES = load_hotel_search_cases()
 
 
-@pytest.mark.parametrize("case", CASES, ids=[c.param_id for c in CASES])
+@pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
 def test_search_submits_expected_params(page, request, blocked_guard, case):
     hotel = HotelSearchPage(page)
 
@@ -70,9 +71,14 @@ def test_search_submits_expected_params(page, request, blocked_guard, case):
     assert params["children"][0] == str(case.children), (
         f"children（儿童数）不符：{params.get('children')}"
     )
-    assert case.city in hotel.display_of(params), (
-        f"display 参数里没有 {case.city}：{hotel.display_of(params)!r}"
+    # 城市走「id 相等 + 中文名包含」两条，**不比对 display 的完整文案**。
+    # 实测（reports/probe_city_id.json，2026-11-01）：上海/北京 的 display 是
+    # 「城市, 中国」，广州是「城市, 省, 中国」—— 站点按行政层级拼，写死格式会误红。
+    assert params["city"][0] == str(case.expected["city_id"]), (
+        f"city（城市 id）应为 {case.expected['city_id']}；实际 {params.get('city')}"
     )
+    display = hotel.display_of(params)
+    assert case.city in display, f"display 参数里没有 {case.city}：{display!r}"
 
     # 落点写进报告：本期望必被登录墙接管，记录它是为了对照，不作为判定条件。
     request.node.add_report_section(

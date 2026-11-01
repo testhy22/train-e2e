@@ -19,7 +19,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 数据质量门。独立成 job 而不是塞进 ui 的第一步，理由有三：
+  #   1. 它**不装浏览器**（纯离线，约 2 秒），放在 ui 里等于让数据问题排在一次
+  #      `playwright install` 之后才红；
+  #   2. 两条轨道（ui / ui_hotels）将来都要它，写在 ui 里就得复制一份到 hotels，
+  #      两份校验迟早不同步；
+  #   3. 用 `needs: data` 挂到 suite job 上，新加轨道只要写一行 needs 就自动继承。
+  # 约束：**新增任何 suite job 都必须 `needs: data`** —— 这是唯一的强制入口。
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 数据质量校验
+        # 覆盖 data/hotels 与 data/trains 两份：id 唯一 / ASCII / 无敏感信息 /
+        # 日期不变量 / expected 闭集 / city_id 实测映射 / 基准日可注入与午夜不漂。
+        # 数据配错在这里就红，而不是表现成「某条 UI 用例莫名失败」。
+        run: python -m pytest tools/tests/test_case_data.py -q
+
   ui:
+    needs: data
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -41,6 +72,13 @@ jobs:
       - name: 安装浏览器
         run: python -m playwright install --with-deps chromium
 
+      - name: 安装 xvfb（trains 需要显示服务）
+        # trains.ctrip.com 在无头模式下整站返回 432 `whaleguard block`，有头才 200
+        # （2026-11-01 实测：有头 200/953 字符、无头 432/17 字符，同一分钟对照）。
+        # xvfb 是在无显示服务的机器上提供一块虚拟屏，让 Chromium 能以有头模式启动；
+        # 它不改变浏览器对外暴露的身份，也不改任何断言。
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: 取回 ledger（G3/G4 要历史）
         run: |
           mkdir -p .ledger
@@ -55,9 +93,12 @@ jobs:
       - name: UI 用例（独立 junit，供门禁消费）
         id: ui
         continue-on-error: true       # blocked 是 xfail，pytest 本身退出 0；真失败由 G0 兜
+        env:
+          HEADED: "1"                 # 有头：无头下 trains 恒被 432 拦，轨道会永远红
+          HUMAN: "0"                  # 关键：HEADED=1 会自动开拟人，CI 必须显式关掉
         run: |
           mkdir -p reports
-          python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
+          xvfb-run -a python -m pytest suites/thirdparty -m ui --junitxml=reports/junit-ui.xml
 
       - name: blocked 门禁
         id: gate
@@ -69,6 +110,12 @@ jobs:
 
       - name: 追加 ledger 并读回校验
         if: always() && steps.gate.outcome != 'skipped'
+        # 修既有缺陷（2026-11-01 run 41284293750 暴露）：`tools/ledger_append.py`
+        # 写完账本后用 `gh api` 读回校验，而此前这个 job 从没设过 GH_TOKEN ⇒
+        # 追加其实成功了，读回却 `gh api 退出 4`，整步报红。
+        # 用 secrets.GITHUB_TOKEN（Actions 自动注入，无需额外建 secret）。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/ledger_append.py reports/gate-record.json
 
       - name: 上传证据
@@ -102,6 +149,7 @@ jobs:
 # 本轮只落草案：打开方式是把下面每行的 "# " 去掉（行内缩进会保留），再按上面三条确认。
 #
 #   hotels:
+#     needs: data          # 数据门在这里，与 ui job 同一入口
 #     runs-on: ubuntu-latest
 #     timeout-minutes: 30
 #     env:

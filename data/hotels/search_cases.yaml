@@ -1,0 +1,79 @@
+# 酒店搜索用例数据（一期：目的地 / 入住 / 退房 / 房间及住客）
+#
+# 字段
+#   id                  用例标识：小写字母数字与 - _，**必须是 ASCII**。
+#                       中文放 name —— 中文 id 进 junit 会变成 \u665a 这样的转义，读不出来。
+#   name                中文名，只用于报告展示，不参与任何判定
+#   city                城市名，必须能命中首页目的地联想面板
+#   checkin_offset_days 相对今天的天数（1…60，工程边界，非业务口径）
+#   nights              住几晚（>=1）；退房日 = 入住日 + nights
+#   rooms/adults/children 房间与住客；页面默认 1 间 1 位，故只支持不低于默认值
+#   tags                `-k` 过滤用，必填且非空
+#   expected            外部可观测的预期，**只放无法由输入直接推出的东西**
+#     city_id           提交时 /hotels/list 的 `city` 参数，**实测值**，不许猜。
+#                       实测日期：2026-11-01
+#                       来源：只读探针跑首页 → 提交 → 记下真实请求参数，
+#                             输出 reports/probe_city_id.json（文件未跟踪；
+#                             等价脚本见 PR #1 §2，可直接粘贴复跑）。三行输出：
+#                               上海 → city=2    display=「上海, 中国」
+#                               北京 → city=1    display=「北京, 中国」
+#                               广州 → city=32   display=「广州, 广东, 中国」
+#                       城市名 → id 的映射是站点侧口径，不是能从输入推出来的。
+#                       ⚠️ city_id **可能随站点版本变化**（改版 / 换接口都可能换 id）。
+#                       要改这里，先重跑一次探针拿实测值，不要按「看着差不多」改。
+#
+# 为什么 expected 里**不**放 display 文案：
+#   实测（2026-11-01）上海/北京 是「城市, 中国」，广州是「城市, 省, 中国」——
+#   站点按行政层级拼，段数随城市变。把完整文案落进数据，等于把一个会变的东西
+#   钉成预期；断言只做「包含城市中文名」，中文名本来就来自输入 city，不需要再抄一份。
+#
+# 为什么用偏移量而不是写死日期：
+#   写死的日期今天能跑、明天就是过去时，用例会红得没有信息量。与火车票同一原则。
+#
+# 为什么 expected 里不再抄一份 nights/rooms/adults：
+#   那些就是输入本身。抄一份只会让两个数字日后各自漂移，
+#   一致性由 tools/tests/test_case_data.py 断言（expected 里的派生值必须与输入吻合）。
+#
+# 儿童数固定 0：加儿童会在弹层里多出年龄选择控件，2026-11-01 的探针没覆盖，
+# 属二期范围，不在本期假装支持。
+
+version: 1
+suite: hotels
+marker: hotels
+
+cases:
+  - id: sh-2n1r1a
+    name: 上海-2晚1间1位
+    city: 上海
+    checkin_offset_days: 7
+    nights: 2
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [smoke, sh]
+    expected:
+      city_id: 2
+
+  - id: bj-3n2r3a
+    name: 北京-3晚2间3位
+    city: 北京
+    checkin_offset_days: 10
+    nights: 3
+    rooms: 2
+    adults: 3
+    children: 0
+    tags: [smoke, bj]
+    expected:
+      city_id: 1
+
+  - id: gz-1n1r2a
+    name: 广州-1晚1间2位
+    city: 广州
+    checkin_offset_days: 14
+    nights: 1
+    rooms: 1
+    adults: 2
+    children: 0
+    tags: [smoke, gz]
+    expected:
+      city_id: 32
