@@ -110,6 +110,12 @@ jobs:
 
       - name: 追加 ledger 并读回校验
         if: always() && steps.gate.outcome != 'skipped'
+        # 修既有缺陷（2026-11-01 run 41284293750 暴露）：`tools/ledger_append.py`
+        # 写完账本后用 `gh api` 读回校验，而此前这个 job 从没设过 GH_TOKEN ⇒
+        # 追加其实成功了，读回却 `gh api 退出 4`，整步报红。
+        # 用 secrets.GITHUB_TOKEN（Actions 自动注入，无需额外建 secret）。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/ledger_append.py reports/gate-record.json
 
       - name: 上传证据
