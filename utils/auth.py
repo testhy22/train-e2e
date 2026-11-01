@@ -5,13 +5,19 @@
 然后排查方向会变成怀疑 state 文件写入、怀疑 context 隔离、怀疑站点，而不是那条判据本身。
 
 判据顺序按「反证强于正证」排：
-  1. 顶部「注册」可见 ⇒ **一定**未登录。
+  1. 顶部「注册」或「登录」可见 ⇒ **一定**未登录。
      依据：2026-11-01 用户截图，未登录态顶部导航同时出现「登录」「注册」；
-     登录成功后「注册」消失。这是本项目唯一有画面证据的判据。
-  2. 头像 / 账户区元素可见 ⇒ 已登录。⚠️[未查实]：下面的类名候选一次都没实测过，
-     携程构建后 class 可能带哈希。命中不上不要紧，还有第 3 条兜底。
-  3. 页面出现「退出」 ⇒ 已登录。同样是语义兜底。
-三条都不命中 ⇒ 判未登录，并把「没命中任何判据」原样返回 —— 不猜、不假设成功。
+     登录成功后这两个都消失。
+  2. 用户名容器可见且文本形态像账号 ⇒ 已登录（**实测最可靠的一条正证**）。
+     登录态首页顶部是 `span[class*='header_login_title_name']` 里的纯文本用户名，
+     既没有头像 img，也没有「退出」，所以只认头像的老判据会全部落空。
+  3. 头像 / 账户区 img 可见 ⇒ 已登录。类名候选命中率一般（携程构建后 class 带哈希）。
+  4. 页面出现「退出」 ⇒ 已登录。语义兜底（该站要悬停才出现，命中率低）。
+  5. 「登录」「注册」都不可见，且「我的订单」可见 ⇒ 已登录。
+     兜底条：前四条都没命中时才用。「我的订单」在这里不是为了证明登录，
+     而是证明**页面真的加载出来了** —— 否则空白页/风控页也会因为"没有登录按钮"
+     被误判成已登录。
+五条都不命中 ⇒ 判未登录，并把「没命中任何判据」原样返回 —— 不猜、不假设成功。
 
 新增判据时只改这个文件：改一处，采集和验证同时生效。
 """
@@ -22,14 +28,18 @@ from collections import Counter
 
 from playwright.sync_api import Page
 
-# 未登录态独有的文本。用 exact=True 匹配，避免命中「注册领券包」这类营销文案
-# （首页中部那条「免费注册领券包」横幅是真实存在的，2026-11-01 截图可见）。
-LOGGED_OUT_TEXT = "注册"
+# 未登录态独有的文本（任一可见即未登录）。用 exact=True 匹配，避免命中
+# 「注册领券包」「扫码登录」这类营销/入口文案（2026-11-01 截图均可见）。
+LOGGED_OUT_TEXTS: tuple[str, ...] = ("注册", "登录")
 
 # 已登录态的语义兜底。
 LOGGED_IN_TEXT = "退出"
 
-# 头像 / 账户区候选。**全部 ⚠️[未查实]**，按稳定性排序：结构语义 > 类名片段。
+# 页面已加载的旁证：未登录、已登录都有，所以它单独不能证明什么，
+# 只能配合「登录/注册都不可见」一起用，用来排除空白页与风控页。
+PAGE_READY_TEXT = "我的订单"
+
+# 头像 / 账户区候选。按稳定性排序：结构语义 > 类名片段。
 AVATAR_CANDIDATES: tuple[str, ...] = (
     "img[class*='avatar']",
     "[class*='avatar'] img",
@@ -38,8 +48,50 @@ AVATAR_CANDIDATES: tuple[str, ...] = (
     "[class*='userCenter']",
 )
 
+# 用户名容器（2026-11-01 实测取证，不是猜的）。
+# 登录态首页顶部账号区的真实结构：
+#   li.tl_home_header_item_JJ5DU
+#     └ div.tl_nfes_home_header_login_wrapper_siwkn
+#         └ button.tl_nfes_home_header_login_IUsnp
+#             └ div.tl_nfes_home_header_login_title_5neWJ
+#                 └ span.tl_nfes_home_header_login_title_name_fDEXu  ← 用户名文本
+# 类名带构建哈希后缀（_fDEXu 这类），所以只做前缀匹配，不写死全名。
+# 未登录时这个 span 根本不存在，button 里直接是「登录」两个字。
+USER_NAME_CANDIDATES: tuple[str, ...] = (
+    "span[class*='header_login_title_name']",
+    "[class*='header_login_title_name']",
+)
+
+# 账号容器里可能出现但不是用户名的文案。命中即认为"还没登录"。
+# 用集合而不是单值：站点可能把两者拼成「登录/注册」渲染在同一个节点里。
+LOGIN_ENTRY_WORDS: tuple[str, ...] = ("登录", "注册", "立即登录", "请登录")
+
 # passport 登录墙的域特征。K-04 / K-06 两次现场都落在 passport.ctrip.com。
 LOGIN_WALL_HOST = "passport.ctrip.com"
+
+
+def _user_name_text(page: Page) -> str | None:
+    """顶部账号容器里的用户名文本；不是登录态就返回 None。
+
+    三重校验（缺任何一条都会误判）：
+      · 可见 —— 隐藏的模板节点也带同样 class；
+      · 长度 2~20 —— 过滤空文本、纯图标、整块容器文本；
+      · 不含「登录/注册」—— 未登录时同一容器里躺的是这两个词。
+    """
+    for selector in USER_NAME_CANDIDATES:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0 or not locator.is_visible():
+                continue
+            text = (locator.inner_text() or "").strip()
+            if not text or not (2 <= len(text) <= 20):
+                continue
+            if any(word in text for word in LOGIN_ENTRY_WORDS):
+                continue
+            return text
+        except Exception:
+            continue
+    return None
 
 
 def is_logged_in(page: Page) -> tuple[bool, str]:
@@ -49,10 +101,17 @@ def is_logged_in(page: Page) -> tuple[bool, str]:
     是哪一条判据给的结果。
     """
     try:
-        if page.get_by_text(LOGGED_OUT_TEXT, exact=True).first.is_visible():
-            return False, f"顶部「{LOGGED_OUT_TEXT}」仍可见 ⇒ 未登录"
+        for text in LOGGED_OUT_TEXTS:
+            if page.get_by_text(text, exact=True).first.is_visible():
+                return False, f"顶部「{text}」仍可见 ⇒ 未登录"
     except Exception:
         pass
+
+    # 第 3 条：用户名容器（实测最可靠的一条正证）。
+    # 放在头像之前 —— 头像 img 在这个站点的登录态里其实并不存在，是纯文本用户名。
+    name = _user_name_text(page)
+    if name:
+        return True, f"顶部用户名容器可见：{name!r}"
 
     for selector in AVATAR_CANDIDATES:
         try:
@@ -67,7 +126,15 @@ def is_logged_in(page: Page) -> tuple[bool, str]:
     except Exception:
         pass
 
-    return False, "未命中任何登录判据（三条都没验到）"
+    # 第 4 条：登录入口全消失 + 页面确实加载出来了。
+    # 实测依据见文件头 —— 登录态顶部只有纯文本账号名，前三条都抓不到。
+    try:
+        if page.get_by_text(PAGE_READY_TEXT, exact=False).count() > 0:
+            return True, f"「登录/注册」均不可见且「{PAGE_READY_TEXT}」在场 ⇒ 已登录"
+    except Exception:
+        pass
+
+    return False, "未命中任何登录判据（四条都没验到）"
 
 
 def looks_like_login_wall(url: str) -> bool:
