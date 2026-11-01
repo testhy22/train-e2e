@@ -63,6 +63,9 @@ class TrainSearchPage(BasePage):
     # 按 div.cont 的**完整文本**比，才能真正选中「北京」而不是第一个以北京开头的站。
     SUGGEST_ITEM_LABEL = "div.cont"
     CITY_MASK = "div.widget-city-mask"
+    # 点选最多重试几轮。见 select_city 里的实测根因（K-11）：面板会在点选前后重排。
+    # 3 轮的取舍：1 轮挡不住重排，再多只会把「控件真坏了」的失败拖成几分钟超时。
+    CITY_PICK_RETRY = 3
 
     # 日期：可见文本是 <strong>2026-10-31</strong>，真实 <input> 带 assist-ib-dom 且**不可见**
     #   ⇒ 直接点 input 必报 "Element is not visible"，必须点外层可见块 div.date。
@@ -101,6 +104,9 @@ class TrainSearchPage(BasePage):
 
     def __init__(self, page: Page, base_url: str | None = None) -> None:
         super().__init__(page, base_url)
+        # 最近一次点选时面板里的候选项（纯文本快照），只在失败时进异常消息。
+        # 留着它的理由：这类「点 A 填成 B」的问题，没有现场快照就只能靠猜。
+        self._pick_trace: list[str] = []
 
     # ---------------------------------------------------------------- 页面动作
 
@@ -132,20 +138,43 @@ class TrainSearchPage(BasePage):
         box.click()
         box.fill("")
 
-        if not self._type_and_pick(field, box, city, by_typing=True):
-            # 退路：逐字输入时联想接口偶尔不刷新，改成整串 fill 再触发一次。
-            # 这一步是**功能必要**（否则面板一直停在「对不起，找不到：X」），不是规避检测。
-            if not self._type_and_pick(field, box, city, by_typing=False):
-                raise WidgetUnavailable(
-                    f"{field} 城市下拉里没有「{city}」的精确项"
-                    f"（逐字输入与整串填入都试过，等待 {settings.EXPECT_TIMEOUT_MS * 2}ms）"
-                )
+        # 点选要重试 + 每次都读回核对（2026-11-01 实测根因，K-11）：
+        # 联想面板在输入停止后**还会继续刷新**，「读到 li[0] 是『南京』」到
+        # 「鼠标点下去」之间列表会重排，点完输入框变成「南京南」。
+        # 只用「点到了精确匹配项」判成功是不够的 —— 杭州→南京 那条用例连续 3 轮
+        # 稳定填成「南京南」，而孤立探针里同样的代码 2/2 正确，差异就在重排时机。
+        # 所以判据改成「点完读回的值等于 city」，不对就清空重来。
+        last = ""
+        for attempt in range(1, self.CITY_PICK_RETRY + 1):
+            if not self._type_and_pick(field, box, city, by_typing=True):
+                # 退路：逐字输入时联想接口偶尔不刷新，改成整串 fill 再触发一次。
+                # 这一步是**功能必要**（否则面板一直停在「对不起，找不到：X」），不是规避检测。
+                if not self._type_and_pick(field, box, city, by_typing=False):
+                    raise WidgetUnavailable(
+                        f"{field} 城市下拉里没有「{city}」的精确项"
+                        f"（逐字输入与整串填入都试过，等待 {settings.EXPECT_TIMEOUT_MS * 2}ms）"
+                    )
 
-        self._close_city_panel()
+            self._close_city_panel()
+            actual = box.input_value().strip()
+            if actual == city:
+                if attempt > 1:
+                    logger_info(f"[火车票] {field} 城市第 {attempt} 次点选才生效（面板重排）")
+                return
+            last = actual
+            logger_info(
+                f"[火车票] {field} 城市第 {attempt} 次点选后值为 {actual!r}"
+                f"（期望 {city!r}），重来；面板当时："
+                f"{' | '.join(self._pick_trace) or '(未记录)'}"
+            )
+            box.click()
+            box.fill("")
 
-        actual = box.input_value().strip()
-        if actual != city:
-            raise WidgetUnavailable(f"{field} 城市输入后值为 {actual!r}，期望 {city!r}")
+        raise WidgetUnavailable(
+            f"{field} 城市点了「{city}」但输入框始终是 {last!r}"
+            f"（重试 {self.CITY_PICK_RETRY} 轮；最后一次点选时的面板项："
+            f"{' | '.join(self._pick_trace) or '(未记录)'}）"
+        )
 
     # ---------------------------------------------------------------- 城市面板内部
 
@@ -199,14 +228,20 @@ class TrainSearchPage(BasePage):
 
         不用 get_by_text(city, exact=True)：面板里前几项是「北京北 / 北京东 / 北京南」，
         内层 span 的文本恰好是「北京」，exact 匹配会先命中它们。
+
+        点击前把面板快照记进 `self._pick_trace`：K-11 那类「点南京填成南京南」的问题，
+        现场只留下「值不对」三个字是没法定位的，必须知道点下去那一刻列表长什么样。
         """
         items = self._panel(field).locator(self.SUGGEST_ITEM)
         want = _norm(city)
+        self._pick_trace = []
         for i in range(items.count()):
             label = items.nth(i).locator(self.SUGGEST_ITEM_LABEL).first
             if not label.count():
                 continue
-            if _norm(label.inner_text()) == want:
+            text = _norm(label.inner_text())
+            self._pick_trace.append(f"[{i}]{text}")
+            if text == want:
                 items.nth(i).click()
                 return True
         return False
