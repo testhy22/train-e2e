@@ -38,6 +38,7 @@ from utils.case_data import (
     load_hotel_search_cases,
     load_train_smoke_cases,
 )
+from utils import discover
 from utils.search_flow import SearchOutcome, search_flight, search_hotel, search_train
 
 pytestmark = [pytest.mark.e2e]
@@ -70,6 +71,24 @@ def _waf_guard(page, request) -> None:
         f"信号：{signal}\nurl：{page.url}\n截图：{', '.join(shots) or '(截图失败)'}",
     )
     pytest.xfail(f"blocked: {signal.kind}（{signal.detail}）")
+
+
+def _discover_quietly(page, site: str, source_case: str, request) -> None:
+    """旁路采集：DISCOVER=1 才执行；任何异常都不许影响主判定（discover 铁律 1）。
+
+    hook 式已否决（teardown 时页面停在末尾状态，采到的是静默错数据），
+    所以挂在「结果页已断言」之后的确定时刻显式调用。
+    """
+    if not discover.enabled():
+        return
+    try:
+        result = discover.collect(page, site=site, source_case=source_case)
+        note = discover.coverage_note(result, site, source_case)
+        request.node.add_report_section("call", "自动发现（旁路）", note)
+    except Exception as exc:  # noqa: BLE001 —— 双保险：discover 内部已兜底
+        request.node.add_report_section(
+            "call", "自动发现（旁路）", f"[discover:{site}] 采集层异常（已吞掉）：{exc}"
+        )
 
 
 def _assert_outcome(page, request, out: SearchOutcome, rebuilds: int) -> None:
@@ -116,6 +135,7 @@ def test_chain_hotels(shared_page, shared_session, request, case):
     assert out.params["adult"][0] == str(case.adults), (
         f"adult 不符：{out.params.get('adult')}"
     )
+    _discover_quietly(shared_page, "hotels", case.id, request)
 
 
 # ---------------------------------------------------------------- 火车票（3 组）
@@ -135,6 +155,7 @@ def test_chain_trains(shared_page, shared_session, request, case):
     assert out.params["dDate"] == case.depart_date, (
         f"结果页 URL 的 dDate 是 {out.params.get('dDate')}，期望 {case.depart_date}"
     )
+    _discover_quietly(shared_page, "trains", case.id, request)
 
 
 # ---------------------------------------------------------------- 机票（4 组）
@@ -152,3 +173,4 @@ def test_chain_flights(shared_page, shared_session, request, case):
         f"结果页 URL 的 depdate 是 {out.params.get('depdate')}，"
         f"期望 {case.depart.isoformat()}"
     )
+    _discover_quietly(shared_page, "flights", case.id, request)

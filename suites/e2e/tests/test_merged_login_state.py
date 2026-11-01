@@ -48,9 +48,24 @@ import pytest
 
 from config import settings
 from pages.base_page import BasePage
+from utils import discover
 from utils.auth import looks_like_login_wall, wait_logged_in
 from utils.humanize import Humanizer, human_enabled
 from utils.waf import check_waf_block
+
+
+def _discover_quietly(page, site: str, source_case: str, request) -> None:
+    """旁路采集（与 test_search_chain 同口径）：DISCOVER=1 才执行，异常只记不抛。"""
+    if not discover.enabled():
+        return
+    try:
+        result = discover.collect(page, site=site, source_case=source_case)
+        note = discover.coverage_note(result, site, source_case)
+        request.node.add_report_section("call", "自动发现（旁路）", note)
+    except Exception as exc:  # noqa: BLE001 —— 双保险
+        request.node.add_report_section(
+            "call", "自动发现（旁路）", f"[discover:{site}] 采集层异常（已吞掉）：{exc}"
+        )
 
 pytestmark = [pytest.mark.e2e]
 
@@ -155,6 +170,10 @@ def test_merged_state_logged_in_on_all_sites(shared_page, shared_session, reques
         )
         if not ok:
             failed.append(f"{label}（{shared_page.url}）")
+
+        # 旁路采集（第 13 处调用点）：自检页是各站首页，筛选面板大概率未呈现
+        # —— not_present 本身就是覆盖报告的有效观测。DISCOVER 默认关，零开销。
+        _discover_quietly(shared_page, entry, f"login_state:{entry}", request)
 
     body = (
         "【三站判定】\n" + "\n".join(rows)
