@@ -48,11 +48,12 @@ def test_train_search(case, page, blocked_guard, widget_guard, request):
             f"用例：{case.id}\n区间：{case.from_city}→{case.to_city}\n"
             f"日期：{case.depart_date}（T+{case.depart_offset_days}）\n"
             f"URL 的 dDate：{train.url_depart_date()}\n"
-            f"页面自称车次数：{train.declared_result_count()}\n"
+            f"页面自称车次数：{train.declared_result_count(body)}\n"
             f"关键词「{case.expected_keyword}」是否出现：{case.expected_keyword in body}",
         )
 
-        items = train.result_items()
+        # 一次取回全部卡片文本（538 条／页，逐条 inner_text 会撞 180s 超时）
+        texts = train.result_texts()
 
         # 结构层：日期真的生效（URL 里必须是目标日期，否则后面的结果没有意义）
         assert train.url_depart_date() == case.depart_date, (
@@ -60,8 +61,8 @@ def test_train_search(case, page, blocked_guard, widget_guard, request):
         )
 
         # 结构层：条目数达标
-        assert len(items) >= case.min_results, (
-            f"{case.from_city}→{case.to_city} {case.depart_date} 只返回 {len(items)} 条，"
+        assert len(texts) >= case.min_results, (
+            f"{case.from_city}→{case.to_city} {case.depart_date} 只返回 {len(texts)} 条，"
             f"少于 min_results={case.min_results}"
         )
 
@@ -69,22 +70,22 @@ def test_train_search(case, page, blocked_guard, widget_guard, request):
         # 分母扣掉「中转/换乘」卡片 —— 它们由两段拼成，结构上没有单一车次号
         # （2026-11-01 实测：60 条里 5 条是这种卡）。阈值仍是 90%，没有放宽；
         # 但要同时断言这些卡片确实带换乘信息，不能靠「识别成中转」把垃圾条目排除掉。
-        transfers = [i for i in items if train.is_transfer_item(i)]
-        point_to_point = [i for i in items if not train.is_transfer_item(i)]
+        transfers = [t for t in texts if train.is_transfer_text(t)]
+        point_to_point = [t for t in texts if not train.is_transfer_text(t)]
         for card in transfers:
-            assert "换乘" in card.inner_text(), "被判定为中转的卡片里没有换乘信息，判定口径有误"
+            assert "换乘" in card, "被判定为中转的卡片里没有换乘信息，判定口径有误"
 
-        numbers = train.item_train_numbers(point_to_point)
+        numbers = [n for n in (train.train_number_of(t) for t in point_to_point) if n]
         coverage = len(numbers) / len(point_to_point) if point_to_point else 0
         request.node.add_report_section(
             "call",
             "车次号解析",
-            f"条目 {len(items)} 条（点到点 {len(point_to_point)} / 中转 {len(transfers)}）\n"
+            f"条目 {len(texts)} 条（点到点 {len(point_to_point)} / 中转 {len(transfers)}）\n"
             f"抽出车次号 {len(numbers)} 条，覆盖率 {coverage:.1%}\n"
             f"前 5 个车次号：{numbers[:5]}",
         )
         assert numbers, (
-            f"结果里没有任何车次号，前三条文本：{[i.inner_text()[:40] for i in point_to_point[:3]]}"
+            f"结果里没有任何车次号，前三条文本：{[t[:40] for t in point_to_point[:3]]}"
         )
         assert coverage >= TRAIN_NO_COVERAGE, (
             f"点到点条目里能抽出车次号的占比 {coverage:.0%}"

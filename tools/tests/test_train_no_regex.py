@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import pytest
-from playwright.sync_api import Locator
+
 
 from pages.train_search_page import TrainSearchPage
 
@@ -52,18 +52,13 @@ def test_rejects_non_train_tokens(token: str) -> None:
 
 
 class _FakeItem:
-    """只实现 inner_text 的假 item，用来验证中转判定不依赖浏览器。"""
+    """只实现 inner_text 的假 item，用来对照页面的纯文本接口，不碰浏览器。"""
 
     def __init__(self, text: str) -> None:
         self._text = text
 
     def inner_text(self) -> str:
         return self._text
-
-
-def _is_transfer(text: str) -> bool:
-    # 与 TrainSearchPage.is_transfer_item 同逻辑；这里不构造真 Locator。
-    return all(m in text for m in TrainSearchPage.TRANSFER_MARKERS) and "转" in text
 
 
 @pytest.mark.parametrize(
@@ -75,11 +70,22 @@ def _is_transfer(text: str) -> bool:
     ],
 )
 def test_transfer_detection(text: str, expected: bool) -> None:
-    assert _is_transfer(text) is expected
+    assert TrainSearchPage.is_transfer_text(text) is expected
 
 
-def test_fake_item_matches_protocol() -> None:
-    """确认假 item 的接口与 Locator.inner_text 一致，避免自欺。"""
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("06:18 | 广州南 | 0时29分 | G3017 | 06:47 | 深圳北", "G3017"),
+        ("12:15 | 上海 | 21时45分 | 1462 | 10:00 | +1 | 北京丰台", "1462"),
+        ("16:00 | 上海虹桥 | 全程5时1分 | 北京南转 | 换乘16分 | 21:01 | 亦庄", None),
+    ],
+)
+def test_train_number_of(text: str, expected: str | None) -> None:
+    assert TrainSearchPage.train_number_of(text) == expected
+
+
+def test_fake_item_matches_real_text_source() -> None:
+    """假 item 的 inner_text 与 evaluate_all 取到的字符串是同一口径，避免自欺。"""
     item = _FakeItem("换乘 16 分 北京南转")
-    assert isinstance(item.inner_text(), str)
-    assert isinstance(item, _FakeItem) and not isinstance(item, Locator)
+    assert TrainSearchPage.is_transfer_text(item.inner_text()) is True

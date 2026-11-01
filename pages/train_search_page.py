@@ -359,49 +359,53 @@ class TrainSearchPage(BasePage):
 
     # ---------------------------------------------------------------- 取状态（不断言）
 
-    def result_items(self) -> list[Locator]:
-        """结果列表项。只返回元素，是否达标由用例判断。
+    def result_texts(self) -> list[str]:
+        """结果列表项的全部文本，**一次**取回。返回空列表表示没有结果。
 
-        等待窗用 NAV_TIMEOUT_MS 而不是 EXPECT_TIMEOUT_MS(5s)：
-        2026-11-01 实测，同一条广州→深圳的列表，单独跑时 2.4s 出现（538 条），
-        但在连续跑三条用例的那一轮里 5s 内没出现，导致 result_items() 返回 []，
-        用例报「只返回 0 条」而事后截图里列表已经渲染完成
-        （reports/probe_list_timing_2026-11-01.json）。
-        列表是异步渲染的，5s 只是「点击反馈」的尺度，不是「列表就绪」的尺度。
-        这里放宽的只是**等待**，min_results / 覆盖率这些判定门槛一个都没动。
+        为什么不用逐个 Locator.inner_text()：
+        2026-11-01 CI run 41288151390 实测，广州→深圳 一页 **538 条**，
+        「换乘判定 ×2 遍 + 车次号解析」会让 inner_text 往返 1600+ 次，
+        在 xvfb runner 上直接撞 pytest-timeout 的 180s（stack 停在 inner_text 里）。
+        evaluate_all 只往返一次，解析全部放回 Python 侧。
+
+        等待窗用 NAV_TIMEOUT_MS：实测同一份列表单独跑 2.4s 出现（538 条），
+        连跑时 5s 内没出现会误报「0 条」。放宽的只是等待，判定门槛一个没动。
         """
         locator = self.page.locator(self.RESULT_ITEM)
         try:
             expect(locator.first).to_be_visible(timeout=settings.NAV_TIMEOUT_MS)
         except AssertionError:
             return []
-        return locator.all()
+        return locator.evaluate_all("els => els.map(el => el.innerText || '')")
 
-    def is_transfer_item(self, item: Locator) -> bool:
-        """这一条是不是「中转/换乘」方案卡片。
+    @classmethod
+    def is_transfer_text(cls, text: str) -> bool:
+        """这段卡片文本是不是「中转/换乘」方案。
 
         2026-11-01 实测：单程结果列表里会混入「上海虹桥 → 北京南转 → 亦庄 / 换乘 16 分」
         这种两段拼成的卡片，它的文本里没有、也不该有**单一**车次号。
         把它们算进「车次号覆盖率」的分母是口径错误 —— 覆盖率要衡量的是
-        「点到点车次卡片里，车次号能不能解析出来」。只取状态，不断言。
+        「点到点车次卡片里，车次号能不能解析出来」。纯字符串判断，不碰 DOM。
         """
-        text = item.inner_text()
-        return all(marker in text for marker in self.TRANSFER_MARKERS) and "转" in text
+        return all(marker in text for marker in cls.TRANSFER_MARKERS) and "转" in text
 
-    def item_train_numbers(self, items: list[Locator]) -> list[str]:
-        """从每个列表项的文本里抽车次号。抽不到的不返回，由用例判定覆盖率。"""
-        numbers: list[str] = []
-        for item in items:
-            text = item.inner_text()
-            for token in text.split():
-                if self.TRAIN_NO_RE.match(token):
-                    numbers.append(token)
-                    break
-        return numbers
+    @classmethod
+    def train_number_of(cls, text: str) -> str | None:
+        """从一条卡片文本里抽车次号；抽不到返回 None。"""
+        for token in text.split():
+            if cls.TRAIN_NO_RE.match(token):
+                return token
+        return None
 
-    def declared_result_count(self) -> int | None:
-        """页面自称的车次数（「共 557 车次」）。与真实列表条数分开，不混用。"""
-        text = self.page.locator("body").inner_text()
+    def declared_result_count(self, text: str | None = None) -> int | None:
+        """页面自称的车次数（「共 557 车次」）。与真实列表条数分开，不混用。
+
+        传入 text 时复用调用方已经取到的正文，不再对整页做一次 inner_text：
+        2026-11-01 CI 实测，在 538 条卡片的列表页上对整页取文本会强制全量布局，
+        慢 runner 上这一步本身就够慢，重复做没有意义。
+        """
+        if text is None:
+            text = self.page.locator("body").inner_text()
         match = self.RESULT_COUNT_RE.search(text)
         return int(match.group(1)) if match else None
 
