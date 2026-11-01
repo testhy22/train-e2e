@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from config import settings
 from pages.train_search_page import TrainSearchPage
-from utils.data_loader import load_cases
+from utils.case_data import case_ids, load_train_smoke_cases
 
-CASES = load_cases(settings.PROJECT_ROOT / "test_data" / "search_cases.yaml")
+# 数据在 data/trains/smoke_cases.yaml（可用 CASE_DATA_DIR 覆盖）。
+CASES = load_train_smoke_cases()
 
 # ui：驱动浏览器，纳入 blocked 门禁的统计范围。数据层单测不得带这个标记。
 pytestmark = pytest.mark.ui
@@ -26,7 +26,7 @@ pytestmark = pytest.mark.ui
 TRAIN_NO_COVERAGE = 0.9
 
 
-@pytest.mark.parametrize("case", CASES, ids=[c.param_id for c in CASES])
+@pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
 def test_train_search(case, page, blocked_guard, widget_guard, request):
     """完整流程：填城市 → 选日期 → 搜索 → 三层断言。"""
     train = TrainSearchPage(page)
