@@ -13,17 +13,18 @@
 
 ---
 
-## K-01 日历控件唤不起
+## K-01 日历控件唤不起 —— **已修复（2026-11-01）**
 
 | 项 | 内容 |
 |---|---|
 | 现象 | 日期输入框点击后，`.widget-calendar-depart-wrap` 面板不再出现；面板出现时带 `.widget-calendar-mask` 遮罩，会拦住搜索按钮点击 |
 | 取证 | 2026-10-31，`tools/probes/probe8.py` / `probe_interact.py`，截图见 `docs/locator-evidence/cal-attempt1.png`、`cal-open.png` |
 | 已试无效 | 点日期文字、点 `.date` 容器、JS `focus()`、JS 派发 `click`、`hover` 后点击 |
-| 为什么不是缺陷 | 这是对方页面的自定义控件行为，与本工程代码无关；加重试只会变成「靠运气过」 |
-| 影响 | `test_train_search` 走到 `select_date()` 时抛 `WidgetUnavailable` → 记为 `known-limit` 跳过，不进分母 |
-| 销号条件 | 用 1 次只读探针证明日历能稳定唤起（≥3 次连续成功），且 `test_train_search` 连续 3 次通过 |
-| 备选方案 | 走 URL 预置 `dDate=YYYY-MM-DD` 直连结果页。**未启用**：⚠️[未查实] 现有证据只是「UI 操作后 URL 出现 dDate」，不是「手工构造 URL 直达生效」。动这条路径前必须先做 1 次只读探针 |
+| **根因（2026-11-01 查实）** | 不是「控件唤不起」，是三个**我们自己的**定位器/时序缺陷，各有实测证据：<br>① 日期块点的是 `#label-departDate`，该 `<input>` 带 `assist-ib-dom`，Playwright 判为不可见（`force=True` 也点不动）⇒ 实际点的是 `get_by_text(depart_date)` 兜底，而日历没打开时页面上**不存在**这个日期文本，于是 15s 超时；<br>② 城市面板选完后 `div.widget-city-mask` 没关（1440×900 全覆盖），后续所有点击被 `intercepts pointer events` 拦掉；<br>③ 城市项按 `get_by_text(city, exact=True)` 全局匹配，会命中页面底部「热门路线」的同名城市，或命中 `li`「北京北」内层的 `span`（文本恰为「北京」）⇒ 表单没真正选中却让 `input_value` 看起来正常，这就是旧记录里「回填成北京北」的来历 |
+| 修法 | `pages/train_search_page.py`：日期改点 `div.search-date div.date`；城市面板限定在 `div.<field>-station-picker-wrap ul.widget-search-bd` 内、按 `div.cont` **完整文本**匹配 `li`；选完点遮罩关闭；`PlaywrightTimeout` 统一转 `WidgetUnavailable`。日历就绪锚点用 `ul.widget-calendar-hd`（容器 `.widget-calendar-depart-wrap` 的边界框宽 0，拿它判可见永远等不到） |
+| 验证 | 2026-11-01 本机：有头 `HEADED=1 HUMAN=0` → **5 passed**（含解封后的 `test_calendar_widget_opens`）；无头 → 5 xfailed 于 `waf_block`（K-05 已知，无头下整站被拦，未走到控件）。只读探测：`reports/probe_dom{1,2,3,4,5}_2026-11-01.py` |
+| 销号条件 | 已满足「`test_train_search` 连续 3 次通过」中的本机部分（单跑 hz-nj 1 次 + 整轮 2 次全绿）；CI 侧待一次绿 run 后正式销号 |
+| 备选方案 | 走 URL 预置 `dDate=YYYY-MM-DD` 直连结果页。**未启用**（已不需要）：⚠️[未查实] 现有证据只是「UI 操作后 URL 出现 dDate」，不是「手工构造 URL 直达生效」 |
 
 ## K-02 预售期上限 15 天（含当日）
 
