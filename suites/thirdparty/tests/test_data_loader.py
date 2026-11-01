@@ -8,7 +8,7 @@ from utils import data_loader
 from utils.data_loader import DataError, load_cases, param_ids
 
 TODAY = date(2026, 10, 31)
-# 2026-11-01 数据迁移：test_data/ → data/trains/，并加了 version/cases 包装。
+# 2026-11-01 数据迁移：旧用例目录（113d30a 已删）→ data/trains/，并加了 version/cases 包装。
 # 本文件测的是解析器，包装的定位与版本校验在 tools/tests/test_case_data.py。
 YAML_PATH = "data/trains/smoke_cases.yaml"
 
