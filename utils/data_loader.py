@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -40,6 +41,9 @@ class Case:
     depart_date: str          # YYYY-MM-DD，由偏移量解析得到
     min_results: int
     expected_keyword: str     # 仅用于日志与报告，不参与 pass/fail
+    name: str = ""
+    tags: tuple[str, ...] = ()
+    expected: dict[str, Any] | None = None
 
     @property
     def param_id(self) -> str:
@@ -75,6 +79,25 @@ def resolve_date(offset_days: int, today: date) -> str:
     return resolved.isoformat()
 
 
+def _cases_of(raw: object, file: Path) -> list:
+    """取用例列表。同时接受裸列表与 `version: 1` + `cases:` 包装。
+
+    包装在 `data/` 目录启用（见 `utils/case_data.py`），历史文件仍是裸列表；
+    两种都要能读，否则迁移期间会有一半文件读不了。版本号不认识就报错，不猜。
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        version = raw.get("version")
+        if version != 1:
+            raise DataError(f"{file}: version 必须是 1，收到 {version!r}")
+        cases = raw.get("cases")
+        if not isinstance(cases, list):
+            raise DataError(f"{file}: cases 必须是列表，收到 {type(cases).__name__}")
+        return cases
+    raise DataError(f"{file}: 顶层必须是列表或含 cases 的映射")
+
+
 def load_cases(path: str | Path, today: date | None = None) -> list[Case]:
     """读取用例文件。today 只用于测试注入，生产环境取本机当天。"""
     file = Path(path)
@@ -86,14 +109,15 @@ def load_cases(path: str | Path, today: date | None = None) -> list[Case]:
     except yaml.YAMLError as exc:
         raise DataError(f"YAML 解析失败：{exc}") from exc
 
-    if not isinstance(raw, list) or not raw:
-        raise DataError("用例文件的顶层必须是非空列表")
+    items = _cases_of(raw, file)
+    if not items:
+        raise DataError("用例文件里没有任何用例")
 
     base_day = today or datetime.now().date()
     cases: list[Case] = []
     seen: set[str] = set()
 
-    for index, item in enumerate(raw):
+    for index, item in enumerate(items):
         position = f"第 {index + 1} 条"
         if not isinstance(item, dict):
             raise DataError(f"{position}用例不是键值对")
@@ -124,6 +148,9 @@ def load_cases(path: str | Path, today: date | None = None) -> list[Case]:
                 expected_keyword=_as_text(
                     item.get("expected_keyword", ""), "expected_keyword", case_id, allow_empty=True
                 ),
+                name=str(item.get("name", "")).strip(),
+                tags=tuple(str(t) for t in (item.get("tags") or [])),
+                expected=dict(item.get("expected") or {}),
             )
         )
 
