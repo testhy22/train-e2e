@@ -32,7 +32,7 @@ e2e 那 12 条用例断言的是「填表 → 提交 → 结果列表出数据�
 
 ## 位置
 
-文件名 `test_login_state.py` 排在 `test_search_chain.py` 之前，pytest 按文件名
+文件名 `test_merged_login_state.py` 排在 `test_search_chain.py` 之前，pytest 按文件名
 顺序执行，所以它**天然跑在十二次搜索之前**：登录态不成立时，第一眼看到的就是
 它，而不是等 300 秒后从某条搜索的红里猜原因。
 """
