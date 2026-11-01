@@ -14,7 +14,7 @@
    自动等待或显式 `expect(...)` 条件等待。
    —— 允许：`expect(locator).to_be_visible()`；以及 `utils/humanize.py` 的拟人节奏
    （只在动作之间停顿，**不得**用来等页面状态，边界见该文件头）。
-3. 测试数据不得硬编码在测试文件内，全部写进 `test_data/*.yaml`。
+3. 测试数据不得硬编码在测试文件内，全部写进 `data/**/*.yaml`，经 `utils/case_data.py` 加载。
 4. 失败必须留下证据：截图 + URL + title 写进报告；trace 用 `retain-on-failure`。
 5. 选择器优先语义定位（`get_by_role` / `get_by_placeholder` / `get_by_text`），避免层级 CSS。
 6. 城市输入优先 `fill()`；实测 `fill` 触发不了联想时才退到 `press_sequentially`，
@@ -67,52 +67,19 @@ python tools/blocked_gate.py reports/junit-hotels.xml --scope ui_hotels
 
 ### 本地可见调试（有头，仅本地）
 
-要看窗口就把它显示出来。一键入口：
-
 ```bash
 scripts/run-headed.sh suites/hotels -m hotels
-scripts/run-headed.sh suites/thirdparty -m ui
+SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui     # trains 还没接拟人，要慢放
 ```
 
-脚本固定 `HEADED=1 HUMAN=1`，其余 pytest 参数原样透传。四个开关：
+脚本固定 `HEADED=1 HUMAN=1`。四个开关（`HEADED` / `HUMAN` / `HUMAN_SEED` / `SLOWMO`）、
+Linux 无显示服务时的行为、与 CI 的差异表，全部在
+[`docs/HEADED-DEBUG.md`](docs/HEADED-DEBUG.md)。
 
-| 变量 | 作用 | 默认 |
-|---|---|---|
-| `HEADED=1` | 有头启动，窗口真实显示在本机桌面 | 无头 |
-| `HUMAN=1` | 拟人节奏：逐字符输入、鼠标分步移动、动作之间随机停顿 | **未设时跟随 `HEADED`**（有头开、无头关） |
-| `HUMAN_SEED` | 固定停顿序列，便于复现时序问题 | 每次随机 |
-| `SLOWMO` | **额外**的全局固定延迟（毫秒），只在单个动作仍看不清时用 | 不启用 |
+两条要点：
 
-两者会叠加，所以**默认不要同时用**：拟人已让操作看得清，`--slowmo` 只会把节奏变机械。
-看不清时再加 `SLOWMO=300`（或 `800`）。
-
-火车票轨道的页面对象**还没接拟人节奏**（本轮只做了酒店），所以想看慢动作要用 `SLOWMO=800`：
-
-```bash
-SLOWMO=800 scripts/run-headed.sh suites/thirdparty -m ui
-```
-
-Linux 上缺少 `DISPLAY` / `WAYLAND_DISPLAY` 时，脚本直接报「当前环境看不到窗口」并退出 3，
-**不用 xvfb 冒充可见** —— 那样窗口不会真的出现，只会让人一直等一个不存在的窗口。
-
-#### 与 CI 的差异
-
-| 场景 | 浏览器 | 拟人 | 说明 |
-|---|---|---|---|
-| 本地 `scripts/run-headed.sh` | 有头 | 开 | 只为人工看清过程 |
-| CI `hotels` | headless | 恒关（`HUMAN=0`） | 酒店在无头下正常，范围见 `docs/KNOWN-LIMITATIONS.md` K-05 |
-| CI `ui`（trains） | `xvfb-run -a` + `HEADED=1` | 恒关（`HUMAN=0`） | trains 无头下整站被 432 拦，见 K-05 |
-
-`HUMAN=0` 在 CI 里是**必须显式写**的：`HEADED=1` 会自动开启拟人，不写就等于开了。
-
-拟人只调**时间**，不碰 User-Agent / 自动化标记 / stealth 脚本；也**不因为被拦就调慢重试** ——
-被拦照旧记 `blocked` → `xfail`。三条边界写在 `utils/humanize.py` 文件头。
-
-> **已知未解（根因 ⚠️[未查实]）**：有头跑酒店时曾出现一次 180 秒超时（第 3 条参数化，
-> 进程被 `pytest-timeout` 杀掉，junit 未生成）。手上只有「同期截图里存在地理位置权限询问框」
-> 这一条旁证，**没做**「去掉 `permissions` 再跑」的对照，所以不归因到弹窗。之后加
-> `permissions: []` 并连跑两次均通过，但**一次通过不等于已修复**。
-> 再复现时的正确动作：单跑该条 + `--durations` 定位到具体阶段，不猜。
+- `HEADED=1` 会自动开拟人，**默认不要再叠加 `--slowmo`**，看不清再加 `SLOWMO=300/800`。
+- 拟人只调时间不碰身份，被拦照旧记 `blocked` → `xfail`，**不因为被拦就调慢重试**。
 
 ---
 
@@ -120,23 +87,32 @@ Linux 上缺少 `DISPLAY` / `WAYLAND_DISPLAY` 时，脚本直接报「当前环�
 
 ```
 config/settings.py          唯一配置出口：站点、超时、视口、预售期常量、证据目录
-pages/base_page.py          有界等待、风控识别（detect_block）、失败截图
+pages/base_page.py          有界等待、风控识别（detect_block）、失败截图、拟人原语入口
+pages/hotel_search_page.py  酒店页 POM：目的地/日期/房间住客/提交并抓请求参数
 pages/train_search_page.py  火车票页 POM：城市选择、日历选择、搜索、取结果状态
-utils/data_loader.py        读 YAML → 偏移量转日期 → parametrize 数据与 id
-test_data/search_cases.yaml 用例数据（只写「哪个区间、第几天、至少几条」）
-suites/thirdparty/tests/    track B：真站点
+utils/case_data.py          用例数据统一入口：data/ 定位、version 包装、CASE_DATA_DIR
+utils/hotel_data.py         酒店数据解析：偏移量+晚数 → 具体日期，字段校验
+utils/data_loader.py        火车票数据解析：偏移量 → 日期，预售期与 id 校验
+utils/humanize.py           拟人操作节奏（只调时间不碰身份，边界见文件头）
+data/hotels/search_cases.yaml  酒店用例数据
+data/trains/smoke_cases.yaml   火车票冒烟数据
+suites/hotels/tests/        track B：酒店首页模块
+  test_hotel_search.py      四字段搜索：断言提交时真实发出的 /hotels/list 参数
+suites/thirdparty/tests/    track B：火车票
   test_smoke.py             冒烟：只打开页面、检测 blocked、记录 title/URL
   test_train_search.py      功能：三层断言（结构 / 内容 / 辅助）
   test_calendar_widget.py   K-01 的活样本，故意 skip，用来说明 known-limit 口径
-  test_data_loader.py       数据层单测（27 项，不需要浏览器，不带 ui 标记）
+  test_data_loader.py       数据层单测（30 项，不需要浏览器，不带 ui 标记）
 suites/regression/          track A：容器靶站，空骨架，等 M1-3
 tools/blocked_gate.py       blocked 门禁判定器（规范：docs/BLOCKED-GATE.md）
 tools/ledger.py             ledger 记录的结构与校验
 tools/ledger_append.py      追加到 ops/metrics 分支并读回校验
-tools/tests/                门禁与账本自身的单测（35 项，不需要浏览器）
+tools/tests/                门禁、账本、拟人节奏、数据质量的单测（69 项，不需要浏览器）
 tools/probes/               一次性定位器探针（不参与测试运行，留作取证）
+scripts/run-headed.sh       本地可见调试入口（有头 + 拟人）
 docs/BLOCKED-GATE.md        判定规则的唯一来源
-docs/KNOWN-LIMITATIONS.md   K-01 / K-02 / K-03
+docs/HEADED-DEBUG.md        本地可见调试与用例数据目录（HEADED/HUMAN/SLOWMO/SEED、CASE_DATA_DIR）
+docs/KNOWN-LIMITATIONS.md   K-01 … K-05
 docs/locator-evidence/      探针结果 JSON 与拦截截图（定位器的取证来源）
 conftest.py                 浏览器上下文、scope 标记、blocked→xfail、known-limit→skip、失败取证
 ```
