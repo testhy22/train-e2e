@@ -361,13 +361,32 @@ python scripts/allure_report.py --serve    # 起本地服务看（趋势可交�
 - **Environment**：base_url ×3、headless、Python / Playwright 版本、是否续上历史 —— 每份报告自证环境。
 - **Categories**：失败自动归到「对方拦截 / 脚本问题 / 断言不符 / 环境或数据问题」四类。
 
-依赖与工具（本机已装，位置可用环境变量覆盖）：
+依赖与工具（**只认环境变量，仓库内不写任何本机路径**）：
 
 ```
 allure-pytest==2.16.2            # 主依赖，必须 ≥2.16（2.9.x 与 pytest 9 不兼容，K-10 坑①）
-JAVA_HOME   = G:/Program Files\jre-17.0.20.1\jdk-17.0.20.1+1-jre
-ALLURE_BIN  = G:/Program Files\allure-2.46.1\allure-2.46.1\bin\allure.bat
+JAVA_HOME   = $JAVA_HOME         # JRE 8+ 根目录（该目录下应有 bin/java）
+ALLURE_BIN  = $ALLURE_BIN        # allure 可执行文件；不设则回落到 PATH 上的 allure
 ```
 
+**请确保本机已配置这两个环境变量**，否则 `scripts/allure_report.py` 会直接报错退出
+（报错里给出的是「该配什么」，不是某个人的磁盘路径）：
+
+```bash
+# Windows：用户级、永久生效。已在运行的终端读不到新值，必须重开。
+setx JAVA_HOME  "<你的 JRE 目录>"
+setx ALLURE_BIN "<你的 allure 可执行文件>"
+
+# macOS / Linux：写进 ~/.bashrc 或 ~/.zshrc
+export JAVA_HOME="/path/to/jre"
+export ALLURE_BIN="/path/to/allure/bin/allure"
+```
+
+获取方式（两者都不必翻墙，见 `AGENTS.md` 第 9~11 条）：
+
+- **JRE 8+** → Adoptium 镜像 `mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jre/x64/windows/`；
+- **Allure CLI** → Maven 中央仓库
+  `repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/<版本>/`（提供 `.sha256`）。
+
 下载这类二进制资产请走 `tools/smart_download.py`（多源测速 + 按体积自适应超时 + 哈希校验），
-别用单一公共代理硬等 —— `gh-proxy.com` 实测会「HTTP 200 但只给 1.58 MB」，规则见 `AGENTS.md`。
+别用单一公共代理硬等 —— `gh-proxy.com` 实测会「HTTP 200 但只给 1.58 MB」。

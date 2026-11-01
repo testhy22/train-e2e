@@ -14,9 +14,9 @@
     python scripts/allure_report.py --open     # 生成后直接用默认浏览器打开
     python scripts/allure_report.py --serve    # 起临时服务看（带趋势交互）
 
-依赖（本机位置，可用环境变量覆盖）：
-    JAVA_HOME   → 便携 JRE 17
-    ALLURE_BIN  → allure 可执行文件（.bat）
+依赖（**只读环境变量，本文件不含任何本机路径**）：
+    JAVA_HOME   → JRE 8+ 根目录
+    ALLURE_BIN  → allure 可执行文件；不设则回落到 PATH 上的 allure
 """
 
 from __future__ import annotations
@@ -35,25 +35,58 @@ from config import settings
 from utils import allure_support
 from utils.logger import get_logger
 
-# 本机实测路径（2026-11-01 装好并验证过 `allure --version` → 2.46.1）。
-# 不写进 settings 的理由：这是**开发机事实**，不是项目配置；写进去会让 CI 误以为必需。
-DEFAULT_JAVA_HOME = Path(r"G:\Program Files\jre-17.0.20.1\jdk-17.0.20.1+1-jre")
-DEFAULT_ALLURE_BIN = Path(r"G:\Program Files\allure-2.46.1\allure-2.46.1\bin\allure.bat")
-
-
 def _resolve() -> tuple[Path, Path]:
-    java_home = Path(os.getenv("JAVA_HOME") or DEFAULT_JAVA_HOME)
-    allure_bin = Path(os.getenv("ALLURE_BIN") or DEFAULT_ALLURE_BIN)
-    if not (java_home / "bin" / "java.exe").is_file():
+    """解析 JRE 与 allure CLI 的位置。
+
+    **刻意不写任何本机默认路径**（2026-11-01 用户裁决）。原先这里是两条
+    写死的本机绝对路径当兜底，看着省事，代价有三个：
+      1. 换机器/进 CI/进 Docker 直接失效，报错还指向一个根本不存在的盘符；
+      2. 把「某个人的装机位置」固化成项目配置，别人无从判断这是不是必需；
+      3. 一台机器上装了新版也不会被用上 —— 兜底值永远赢过 PATH 上的正确版本。
+
+    现在只认环境变量；`ALLURE_BIN` 额外允许回落 `PATH`（官方安装包/包管理器
+    装好的情形都走这条，不需要再手动指路径）。缺了就报「该配什么」，不报路径。
+    """
+    raw_home = (os.getenv("JAVA_HOME") or "").strip()
+    if not raw_home:
+        raise SystemExit(
+            "未设置 JAVA_HOME（Allure CLI 是 Java 程序，必需）。\n"
+            "  1) 准备一份 JRE 8+，例如 Adoptium 镜像：\n"
+            "     https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jre/x64/windows/\n"
+            "  2) 指到 JRE 根目录（其下应有 bin/java）：\n"
+            '     Windows：setx JAVA_HOME "<你的 JRE 目录>"   # 之后重开终端\n'
+            '     Unix   ：export JAVA_HOME="/path/to/jre"'
+        )
+    java_home = Path(raw_home)
+
+    raw_bin = (os.getenv("ALLURE_BIN") or "").strip()
+    if raw_bin:
+        allure_bin = Path(raw_bin)
+    else:
+        # 不设 ALLURE_BIN 时回落 PATH：包管理器装好的 allure 就走这条，
+        # 不需要再手动指一遍路径。找不到才报错。
+        found = shutil.which("allure")
+        if not found:
+            raise SystemExit(
+                "找不到 allure CLI：未设置 ALLURE_BIN，且 PATH 里也没有 allure。\n"
+                "  1) 从 Maven 中央仓库取（无需翻墙，且带 .sha256）：\n"
+                "     https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/\n"
+                "  2) 解压后指向其中的 bin/allure.bat（Windows）或 bin/allure（Unix）：\n"
+                '     setx ALLURE_BIN "<解压目录>/bin/allure.bat"'
+            )
+        allure_bin = Path(found)
+
+    has_java = (java_home / "bin" / "java.exe").is_file() or (java_home / "bin" / "java").is_file()
+    if not has_java:
         raise SystemExit(
             f"JAVA_HOME 无效：{java_home}\n"
-            "  需要一份 JRE 8+；本机便携版在 G:\\Program Files\\jre-17.0.20.1\\...\n"
-            "  可用环境变量 JAVA_HOME 覆盖。"
+            "  需要 JRE 8+ 的根目录，且其下存在 bin/java（Windows 为 bin/java.exe）。\n"
+            "  从 Adoptium 解压后通常还多一层目录，注意别少写一层。"
         )
     if not allure_bin.is_file():
         raise SystemExit(
-            f"找不到 allure CLI：{allure_bin}\n"
-            "  解压 allure-2.46.*.zip 后指向其中的 bin/allure.bat；可用 ALLURE_BIN 覆盖。"
+            f"ALLURE_BIN 指向的文件不存在：{allure_bin}\n"
+            "  应为解压目录下的 bin/allure.bat（Windows）或 bin/allure（Unix）。"
         )
     return java_home, allure_bin
 
