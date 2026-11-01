@@ -32,6 +32,13 @@ DEFAULT_BASE_URL = "https://trains.ctrip.com"
 #   www.ctrip.com    → 五段齐全（目的地/入住/退房/房间及住客/酒店级别/关键词）
 HOTELS_BASE_URL = "https://www.ctrip.com"
 
+# 机票搜索轨道的站点根（2026-11-01 新增，e2e 串联轨道第三站）。
+# 选 flights.ctrip.com 的「国内机票」入口，不是 www 首页的机票模块：
+# 实测（probe_flights_home.py）该页五段齐全（单程/往返/多程 + 出发地/目的地/
+# 出发日期/乘客类型 + 搜索），并且提交后落 `/online/list/oneway-<三字码>-<三字码>?depdate=…`，
+# 这个 URL 本身就是可断言的外部证据。
+FLIGHTS_BASE_URL = "https://flights.ctrip.com"
+
 # 铁路客票预售期（天，含当日）。
 # 2026-10 核实，来源：12306 官方口径（全国铁路统一预售期 15 天；第三方宣称的
 # 30/90 天预约均为营销说法，实际不可售）。预售期若调整，只改这一处。
@@ -104,6 +111,39 @@ VIEWPORT = {"width": 1920, "height": 1080}
 LOCALE = "zh-CN"
 TIMEZONE_ID = "Asia/Shanghai"
 
+# 物理窗口最大化（2026-11-01 用户追加要求）。
+#
+# 为什么需要单独一个开关，而不是直接把 viewport 删掉：
+# 最大化是「有头」才存在的概念。headless 下 `--start-maximized` 不生效，
+# 而 `no_viewport=True` 会让页面退到默认 1280×720 —— 比原来固定的 1920×1080 更小，
+# 本站的「筛选条件默认折叠/平铺」正好在 1280 与 1920 之间切换（用户追加需求里的坑 1），
+# 所以无头必须继续用固定视口，不能跟着一起改。
+#
+# 关闭方式：MAXIMIZE_WINDOW=0（比如想在固定 1920×1080 下复现某次失败）。
+START_MAXIMIZED = os.getenv("MAXIMIZE_WINDOW", "1").strip() != "0"
+
+
+def window_maximized() -> bool:
+    """是否走「物理最大化 + 视口自适应」。
+
+    只有「有头 + 开关未关」才成立。CI 的 trains job 走 `xvfb-run -a` + `HEADED=1`，
+    那种情况下最大化作用于虚拟屏幕（xvfb 默认 1280×1024），语义仍然是
+    「视口跟随窗口」，不是「写死 1920」。要在 CI 里固定尺寸就设 MAXIMIZE_WINDOW=0。
+    """
+    return (not HEADLESS) and START_MAXIMIZED
+
+
+def context_view_args() -> dict:
+    """context 的视口参数：最大化时 `no_viewport=True`，无头时固定 VIEWPORT。
+
+    为什么不能两个都给：`viewport` 一旦存在，Playwright 就用它覆盖窗口内容区，
+    `--start-maximized` 就白做了 —— 窗口最大、页面仍按 1920 排版。
+    反过来，无头时给 `no_viewport` 会让页面退到 1280×720，比 1920 更小，
+    而本站筛选区的折叠/平铺正好在这两个宽度之间切换。
+    conftest 与探针共用这一个函数，避免各自判断导致尺寸不一致。
+    """
+    return {"no_viewport": True} if window_maximized() else {"viewport": VIEWPORT}
+
 # 浏览器**自带 UI** 的关闭项。2026-11-01 用户在截图里指出两处弹层会挡住页面：
 #   1. 「www.ctrip.com 想要获取您的位置」原生权限气泡 —— 挡住右上角账号区，
 #      恰好压在 hover 用户名那个位置；
@@ -117,6 +157,18 @@ TIMEZONE_ID = "Asia/Shanghai"
 # 不改指纹。它们只关掉浏览器自己的浮层 —— 与 `permissions=[]` 同一性质
 # （都是「让浏览器别插嘴」，而不是「让站点认不出我们」）。
 # 项目红线见 pages/base_page.py 文件头，这条边界不能跨。
+# 为什么**不**用「持久化 profile + 改 Preferences」来关翻译（2026-11-01 评估结论）：
+#   提法是 `launch_persistent_context` + 改写 `user_data_dir/Default/Preferences` 的
+#   `translate.enabled=false`。它确实比启动参数彻底，但代价不可接受，三条：
+#     1. 非持久化 context 的 profile 是**临时目录**，启动后即销毁 —— 没有可改的
+#        Preferences。要用这条路就必须换成持久化 context；
+#     2. 持久化 profile 会保留 cookie / localStorage，于是**匿名轨道不再匿名**。
+#        `ui` / `ui_hotels` 两条 ratio 序列与 K-04（匿名提交必落 passport）的
+#        实验条件当场失效，而这两条是本工程最有信息量的账本；
+#     3. `storage_state` 在持久化 context 里只能用 `add_cookies()` 注入，
+#        **丢掉 origins（localStorage）**，而我们的 state 里正好有 origins。
+#   结论：启动参数 + `--lang` 已能关掉这个气泡（2026-11-01 截图确认），零副作用。
+#   要改成持久化 profile 属于换实验条件，必须重新裁决，不能顺手替换。
 BROWSER_UI_ARGS = (
     "--no-first-run",                     # 首次运行引导
     "--no-default-browser-check",         # 默认浏览器询问
@@ -124,6 +176,18 @@ BROWSER_UI_ARGS = (
     "--disable-search-engine-choice-screen",  # 搜索引擎选择页（会整页劫持）
     # 翻译条：截图里的「英语 / 中文（简体）」就是它。TranslateUI 是旧名，两个都列。
     "--disable-features=Translate,TranslateUI",
+    # 2026-11-01 追加：官方文档里 `--disable-translate` 已是 --disable-features=Translate 的
+    # 旧别名，但旧版二进制仍认它，且代价为零 —— 作为第二道保险保留。
+    "--disable-translate",
+    # 浏览器 UI 语言显式钉成 zh-CN。context 的 locale 只管页面 `Accept-Language` 与
+    # `navigator.language`，管不到浏览器**自己**的界面语言；界面语言是 en 时，
+    # 访问中文站点更容易弹翻译气泡（用户追加需求里的「多语言误触发」）。
+    "--lang=zh-CN",
+    # 物理最大化。放在这里而不是只放在 conftest，是为了让 `tools/probes/*.py`
+    # 用同一份参数启动浏览器 —— 探针窗口与用例窗口尺寸不一致时，
+    # 「探针里能点、用例里点不到」这类问题会浪费一整轮排查。
+    # 无头模式下 Chrome 会忽略它，无害。
+    "--start-maximized",
 )
 
 # 实测记录（2026-11-01，/tmp 探针跑 navigator.permissions.query + 三组对照）：
@@ -173,6 +237,13 @@ def base_url() -> str:
 def hotel_base_url() -> str:
     """酒店轨道的站点根。环境变量 HOTEL_BASE_URL 优先，否则用 HOTELS_BASE_URL。"""
     return _resolve_url((os.getenv("HOTEL_BASE_URL", "").strip() or HOTELS_BASE_URL).strip(), "HOTEL_BASE_URL")
+
+
+def flight_base_url() -> str:
+    """机票轨道的站点根。环境变量 FLIGHT_BASE_URL 优先。"""
+    return _resolve_url(
+        (os.getenv("FLIGHT_BASE_URL", "").strip() or FLIGHTS_BASE_URL).strip(), "FLIGHT_BASE_URL"
+    )
 
 
 def ensure_dirs() -> None:

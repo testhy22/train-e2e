@@ -19,6 +19,10 @@
      被误判成已登录。
 五条都不命中 ⇒ 判未登录，并把「没命中任何判据」原样返回 —— 不猜、不假设成功。
 
+**调用时机也算判据的一部分**（2026-11-01 实测）：首页 `domcontentloaded` 之后
+header 才被 JS 换成用户名，这段时间里「注册」还在。页面刚打开就调 `is_logged_in`
+会把已登录判成未登录 —— 要判登录，先调 `wait_logged_in`（有界等 header 水合）。
+
 新增判据时只改这个文件：改一处，采集和验证同时生效。
 """
 
@@ -140,6 +144,30 @@ def is_logged_in(page: Page) -> tuple[bool, str]:
 def looks_like_login_wall(url: str) -> bool:
     """当前 URL 是否在 passport 登录墙域。只用于写报告，不用来改断言。"""
     return LOGIN_WALL_HOST in (url or "")
+
+
+def wait_logged_in(page: Page, timeout_ms: int = 8000) -> tuple[bool, str]:
+    """有界等待登录判据成立后再返回 (结果, 证据)。
+
+    **为什么需要它（2026-11-01 18:0x 实测踩到，不是预防性设计）**：
+    www 首页是 SPA —— `domcontentloaded` 时 header 先渲染成「登录 / 注册」，
+    随后才被 JS 换成用户名。`is_logged_in` 在这个窗口里做一次性判定，
+    会把**已登录**的会话判成未登录。现场：
+      `test_re_search_from_result_page_via_left_nav[gz-1n1r2a]` 偶发红，
+      失败截图右上角确实是「登录 注册」，而同一 session 里紧挨着的前后两条
+      用同一份 state 的用例都通过 —— 所以不是 state 失效，是判定抢跑。
+
+    等待目标选「用户名容器出现」，不选「注册消失」：header 还没渲染时「注册」
+    本来就不在，用消失当就绪条件会让等待立刻返回，等于没等。
+    """
+    budget = max(1, timeout_ms // max(1, len(USER_NAME_CANDIDATES)))
+    for selector in USER_NAME_CANDIDATES:
+        try:
+            page.locator(selector).first.wait_for(state="visible", timeout=budget)
+        except Exception:
+            continue
+        return is_logged_in(page)
+    return is_logged_in(page)
 
 
 def state_summary(data: dict) -> str:

@@ -77,3 +77,19 @@ cases:
     tags: [smoke, gz]
     expected:
       city_id: 32
+
+  # 远期跨月组（2026-11-01 追加）。目的不是「多一条」，是**逼日历翻月**：
+  # 日历的起始月份跟着已选日期走，同屏只渲染两个月（见 K-09）。
+  # 只有存在「远期」这条时，紧接着跑的近期用例才会走到「往回翻月」分支；
+  # 全是当月数据时，翻月代码永远不被执行，等于没测。
+  - id: bj-far-2n1r1a
+    name: 北京-2晚1间1位（远期跨月）
+    city: 北京
+    checkin_offset_days: 45
+    nights: 2
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [cross-month, bj]
+    expected:
+      city_id: 1

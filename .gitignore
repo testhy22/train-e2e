@@ -22,6 +22,12 @@ venv/
 # 登录态 storageState：内容是**明文会话 cookie**，等价于账号凭据，绝不入库。
 # 目录由 scripts/setup_auth.py 自己创建（含 .gitkeep 也不放，避免目录结构被误当成约定）。
 config/auth/
+# 兜底：state 被随手拷到仓库根、或有人用 launch_persistent_context 落了浏览器用户目录，
+# 这两种产物都是凭据本体，名字对不上 config/auth/ 就漏了 —— 按文件名再挡一层。
+auth_state.json
+*_state.json
+chrome_profile/
+.user-data-dir/
 
 # ---- 编辑器 / 系统 ----
 .vscode/

@@ -29,7 +29,9 @@ from playwright.sync_api import Locator, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
+from utils.diagnostics import instrument_page
 from utils.humanize import Humanizer, human_enabled
+from utils.logger import logger_info
 from utils.overlay import dismiss_promo_overlays
 
 # ---------------------------------------------------------------- 风控特征
@@ -65,6 +67,20 @@ BLOCK_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*40[13]\b"),
     re.compile(r"访问被拒绝"),
     re.compile(r"Access Denied", re.IGNORECASE),
+)
+
+# 风控域名：整页被重定向到这些域时，DOM 可能长得完全正常（甚至搜索框都在），
+# 只有 URL 能说明问题。所以它是**第一条**判据，先于所有元素/文本判据。
+#
+# 与 `passport.ctrip.com` 严格区分，别混：
+#   passport = 要求登录，属业务门槛（`utils/auth.looks_like_login_wall`）
+#   safe/sec/verify = 被判为风险流量，属 blocked（本表）
+# 两者混用的后果很具体：把「没登录」记成「被风控拦」，然后去查风控策略，
+# 而真正要做的是重新扫码。
+BLOCK_HOST_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("safe.ctrip.com", "waf_redirect"),
+    ("sec.ctrip.com", "waf_redirect"),
+    ("verify.ctrip.com", "waf_redirect"),
 )
 
 # 正文正则特征：有些 WAF 不留标题、也不弹验证码，只回一句纯文本。
@@ -105,6 +121,10 @@ class BasePage:
         self.base_url = (base_url or settings.base_url()).rstrip("/")
         self.page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
         self.page.set_default_navigation_timeout(settings.NAV_TIMEOUT_MS)
+        # 挂诊断监听（幂等）：JS 报错 / HTTP≥400 / 请求失败会攒在这个 page 上，
+        # 用例失败时由 conftest 的 makereport 钩子写进报告。
+        # 放在基类构造函数里，是因为所有页面对象都从这里过一遍 —— 没有第二个更靠谱的入口。
+        self.diagnostics = instrument_page(page, label=self.__class__.__name__)
         # 每次导航后关浮层的处理记录。用例可以读它写进报告，
         # 用来回答「浮层到底关掉没有」—— 不然只能靠猜。
         self.overlay_log: list[str] = []
@@ -121,9 +141,18 @@ class BasePage:
     def goto(self, path: str = "/") -> None:
         """打开页面并等载入完成。不传 path 时打开站点根。"""
         url = self.base_url + ("" if path == "/" else path)
+        logger_info(f"[{self.__class__.__name__}] 打开 {url}")
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
         self.dismiss_overlays()
+        logger_info(f"[{self.__class__.__name__}] 已载入 title={self._safe_title()!r}")
+
+    def _safe_title(self) -> str:
+        """读标题，读不到就返回占位 —— 只为日志服务，不该影响任何流程。"""
+        try:
+            return self.page.title()[:80]
+        except Exception:
+            return "(不可读)"
 
     def dismiss_overlays(self) -> list[str]:
         """关掉站点自己的营销浮层。
@@ -159,6 +188,11 @@ class BasePage:
           元素（滑块/验证码/iframe）、文案、标题或拦截页特征。
         全部用零等待的查询（is_visible / count），不会为了判定而卡住用例。
         """
+        # 0. URL 域：被重定向到风控域时页面 DOM 可能一切正常，只有 URL 露馅。
+        for host, kind in BLOCK_HOST_PATTERNS:
+            if host in (self.page.url or ""):
+                return BlockSignal(kind, host)
+
         # 1. 元素类
         for selector in BLOCK_SELECTORS:
             try:

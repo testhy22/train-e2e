@@ -26,13 +26,14 @@ from typing import Any
 import yaml
 
 from config import settings
-from utils import data_loader, hotel_data
+from utils import data_loader, flight_data, hotel_data
 
 DATA_VERSION = 1
 DEFAULT_DATA_DIR = settings.PROJECT_ROOT / "data"
 
 HOTEL_CASES = Path("hotels") / "search_cases.yaml"
 TRAIN_CASES = Path("trains") / "smoke_cases.yaml"
+FLIGHT_CASES = Path("flights") / "search_cases.yaml"
 
 
 def data_dir() -> Path:
@@ -79,6 +80,15 @@ def load_train_smoke_cases(
     target = _resolve(path, TRAIN_CASES)
     _meta(target)
     return data_loader.load_cases(target, today=today)
+
+
+def load_flight_cases(
+    path: str | Path | None = None, today: date | None = None
+) -> list[flight_data.FlightCase]:
+    """机票搜索用例。默认 `data/flights/search_cases.yaml`（2026-11-01 新增）。"""
+    target = _resolve(path, FLIGHT_CASES)
+    _meta(target)
+    return flight_data.load_cases(target, today=today)
 
 
 def case_ids(cases: list) -> list[str]:

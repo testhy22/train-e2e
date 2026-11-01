@@ -18,6 +18,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
 from pages.base_page import BasePage
+from utils.logger import logger_info
 
 
 def _norm(text: str) -> str:
@@ -240,6 +241,7 @@ class TrainSearchPage(BasePage):
              不让 Playwright 的 TimeoutError 漏成 failure 并计入分母。
         """
         target_month, target_day = self._split_date(depart_date)
+        logger_info(f"[火车票] 选出发日期 {depart_date}")
 
         block = self.page.locator(self.DATE_BLOCK).first
         try:
@@ -352,6 +354,7 @@ class TrainSearchPage(BasePage):
 
     def submit(self) -> None:
         """点搜索并等结果页。"""
+        logger_info("[火车票] 点击搜索并等待结果页")
         self.search_button().click()
         self.page.wait_for_url(re.compile(r"/webapp/train/list"), timeout=settings.NAV_TIMEOUT_MS)
         self.wait_ready()

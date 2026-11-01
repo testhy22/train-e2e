@@ -43,9 +43,11 @@
 | 取证 | 2026-11-01，`reports/probe_www_hotels_03.json`（提交后落点）、`reports/probe_www_hotels_04.json`（直开 list URL 亦被拦） |
 | 为什么不绕过 | 登录 / 复用 cookie 属于拿用户凭据绕开频率与身份限制，与 D 决策（零反检测、不复用 cookie）冲突，且 CI 无法安全持有凭据 |
 | 影响 | 一期**不断言结果列表渲染**，改断言「提交时真实发出的 `/hotels/list` 参数」（日期/晚数/房间人数/城市），这是页面自己生成的证据；`test_result_list_renders` 标 `skip("known-limit: K-04 …")`，不进分母 |
-| 保留的契约测试 | `test_list_page_renders_with_full_params`（`suites/hotels/tests/test_hotel_search.py`）。断言「full 参数 + 匿名直开 list 能出卡片」。**本条原先写的是 `test_login_wall_is_global`（断言直开必被拦），实测一跑就红**——按 `reports/probe_www_hotels_06.json` 的事实替换：登录墙挂在「参数完整性 + 会话状态」，不是「列表页不可访问」。2026-11-01 核对时本行仍引用旧名，已按代码实际内容更正 |
-| 销号条件 | `test_login_wall_is_global` 连续 3 天在 CI 中失败（即不再被接管），且能稳定取到酒店卡片 ≥1 条 |
-| 二期方向 | 酒店级别、关键词字段；儿童年龄控件；有合法登录态的独立轨道（需另立决策，不在本期） |
+| 保留的契约测试 | `test_list_page_renders_with_full_params`（`suites/hotels/tests/test_hotel_search.py`）。断言「full 参数 + 匿名直开 list 能出卡片」。**本条原先写的是 `test_login_wall_is_global`（断言直开必被拦），实测一跑就红**——按 `reports/probe_www_hotels_06.json` 的事实替换：登录墙挂在「参数完整性 + 会话状态」，不是「列表页不可访问」。2026-11-01 核对时本行仍引用旧名，已按代码实际内容更新 |
+| 登录态对照（2026-11-01 17:56 实测） | 带上 `config/auth/ctrip_state.json` 走**同一条首页提交路径**：落 `hotels.ctrip.com/hotels/list?...`、无 passport、`[class*='hotel-card']` 13 张、页面文案「找到9382家酒店」。取证 `tools/probes/probe_hotel_auth_search.py` → `reports/probe_hotel_auth/20261101-175636/`（`reports/` 未跟踪）。**这条不销本条的号**：K-04 说的是「匿名态」，匿名态今天仍然落墙，实验条件没变。它证明的是「登录态下这条路能走通」，用例落在独立轨道 `suites/auth/tests/test_hotel_login_search.py`（scope `ui_auth`），不影响 `ui_hotels` 的 ratio 序列 |
+| 重新搜索路径（2026-11-01 18:00 实测） | 在结果页想换条件重搜，**不是**改顶部那个搜索框（它回填上次条件，改城市要先清空），而是点左侧竖排导航「酒店」：`div[class*='lsn_first_nav_wrap']`（46×42 at(15,68)，text=「酒店」）→ 同页跳转回 `https://www.ctrip.com/`（不开新标签）→ `#hotels-destination` 表单回到 1 个，可重填重搜。取证 `tools/probes/probe_hotel_re_search.py` → `reports/probe_hotel_research/20261101-180004/`。**注意别用 `a:has-text('酒店')`**：第一版探针这么写，命中的是正文里一个 56×16 的文字链接（bbox y=3568），落到 `hotels/homepage`（海外酒店首页，表单不在） |
+| 销号条件 | 匿名态（不带 state）从首页提交不再落 passport，且能稳定取到卡片 ≥1 条，在 CI 里连续 3 次观察到。**原条件写的是「`test_login_wall_is_global` 连续 3 天失败」，而该用例早已被 `test_list_page_renders_with_full_params` 替换，条件本身不可判定** —— 2026-11-01 按现存用例重写，不保留一个指不到任何代码的销号条件 |
+| 二期方向 | 酒店级别、关键词字段；儿童年龄控件（有合法登录态的独立轨道已于 2026-11-01 建成，见 K-07） |
 | 相关现场 | 2026-11-01 有头运行曾停在本登录墙并超时，见 K-06。**该画面不作为超时归因** |
 
 ## K-03 blocked 不留 trace
@@ -96,7 +98,9 @@
 | 凭据边界 | state 是**明文会话 cookie**，等价账号凭据。`config/auth/` 已进 `.gitignore`；不进 CI、不进 secret；不因被拦而换账号重试。谁要把 state 放进 CI secret，等于同时推翻 K-04「CI 无法安全持有凭据」的判断，必须重新裁决 |
 | 已实测的坑① | 首页底部「周周享低价 / 领券更划算」浮层带一张**营销二维码**（2026-11-01 截图证据），会让「二维码可见」类断言假绿。`utils/overlay.py` 已在 `BasePage.goto` 后自动关它，`OVERLAY_AUTOCLOSE=0` 可关 |
 | 已实测的坑② | 按窗口标题「微信」判断 PC 微信会**误命中**：同一次 `EnumWindows` 里 Chrome 窗口标题也含「微信」。`utils/wechat.py` 改用类名 `Qt51514QWindowIcon` 作主判据，标题只做弱兜底 |
-| 未完成 | `test_submit_then_list_renders`（`suites/hotels`）仍是 `skip`。它有登录态后**可能**可以启用，但「带 state 跑酒店提交路径是否还落 passport」这次没验证，别默认它能绿 |
+| 已实测的坑③（2026-11-01 18:0x 补） | 结果页顶部的搜索框**不是**「重新搜索」的正路：它回填上一次条件，改城市要先清空。用户实际路径是点左侧竖排导航「酒店」回 `www.ctrip.com` 首页，那里才有完整五段表单。本项已落成用例 `test_re_search_from_result_page_via_left_nav`（`suites/auth/tests/test_hotel_login_search.py`），实测 2 passed / 29.7s |
+| 已补上的验证（2026-11-01 替换原先的「未完成」行） | 原行写的是「`test_submit_then_list_renders` 仍是 skip，带 state 跑酒店提交路径是否还落 passport 这次没验证，别默认它能绿」。**已实测：不落 passport，出 13 张卡片**（`reports/probe_hotel_auth/20261101-175636/`）。但它**仍然不打开** `suites/hotels` 那条 skip —— 那条跑在匿名轨道（scope `ui_hotels`），给它挂 state 等于把「匿名能拿到什么」的序列换成「今天扫没扫码」。登录态的酒店搜索另立用例，见下一行 |
+| 新增用例（2026-11-01） | `suites/auth/tests/test_hotel_login_search.py`，2 条 × 3 组数据（共用 `data/hotels/search_cases.yaml`，不另抄一套数字）：`test_login_search_lands_on_result_list`（首页填表 → 提交 → 落 list → 卡片≥1 → 参数与输入一致）、`test_re_search_from_result_page_via_left_nav`（结果页点左侧「酒店」回首页 → 改入住日与晚数 → 再搜仍出卡片）。scope 走 `ui_auth`，CI 无 state 时按 AUTH-01 skip，不进分母 |
 | 销号条件 | 不需要销号：这是新增能力，不是限制。真要退场，删 `suites/auth` + `scripts/setup_auth.py` + `config/settings.py` 的「登录态」段即可，其余代码不依赖它 |
 
 ---
@@ -114,3 +118,23 @@
 | 浮层是懒渲染 | 悬停**前**扫全文档，与「退出」相关的节点数 = **0**，`body.innerText` 也不含「退出」；悬停后才出现。所以顺序只能是「先 hover，再找元素」，反过来会稳定超时并被误判成「站点没有退出功能」 |
 | 落地做法 | ① `test_account_menu_exposes_logout_entry`（默认跑）：只 hover 展开、断言入口可见 + `href` 指向注销端点，**不点击**，可反复跑、可进 CI；② `test_real_logout_revokes_session`（`AUTH_REAL_LOGOUT=1` 才跑）：真实退出，跑完把 state 改名成 `*.consumed` —— 不改名的话文件看着还在，下次登录用例会红在「未检测到已登录态」，而没人会想到是它干的 |
 | 每跑一次真退出 | 要重采一次：`python scripts/setup_auth.py --entry www`（或 `--entry trains`）。这一步无法自动化进 CI：需要本机登录的 PC 微信 + 有头桌面 |
+
+---
+
+## K-09 日历的起始月份跟着「已选日期」走（同屏只渲染两个月，必须会翻月）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 先选远期（如 `2026-12-01`），再选近期（如 `2026-11-08`）时，日历重开后只渲染 `2026年12月 + 2027年1月`，`11月` 那个块**不存在**。旧实现按「年月标题」找块找不到就静默返回，提交时用的还是上一组的日期 |
+| 取证时间 | 2026-11-01 18:4x–18:5x（`tools/probes/probe_flights_calpage.py`、`probe_cal_others.py`、`probe_hotel_calnav.py`、`probe_flights_calnav2.py`） |
+| 实测证据（机票） | 重开日历可见 `[(2026,12),(2027,1)]`；补翻月后 `select_date(2026-11-08)` → input `'2026-11-08'`，日历已收（`reports/probe_flights_calpage/20261101-185341/`） |
+| 实测证据（酒店） | 同样的「先远后近」：修复前 `Locator.click` 超时 15 s；修复后 → 表单变 `入住 11月8日`（`reports/probe_cal_others/20261101-185638/`） |
+| 为什么 e2e 之前是绿的 | `suites/e2e` 那 3 组酒店 / 4 组机票的日期**恰好**都落在「当前可见两个月」内，等于靠运气。换一组数据、或调换执行顺序就会红 —— 第五轮机票第 4 组正是这么红的 |
+| 顺带查出②：`Escape` 关不掉面板 | 机票 `div.calendar-modal` 按完 Esc 仍可见（探针 39 三次对照），酒店 `.c-calendar-month__days` 同理；两边 `close_calendar` 已统一改成「点面板外空白 + 断言隐藏」。酒店原来写的是 `Esc + to_have_count(0)`，面板开着时必抛断言，等于把「关不掉」报成「用例失败」 |
+| 顺带查出③：翻月箭头没有语义 class | 机票是两个同名 `span.next-ico / span.prev-ico`，**只有一个可见**，用 `.first` 会拿到隐藏的那个（点击超时）；酒店是 `span.c-calendar-icon-prev / -next`，各一个且都可见。两边都按「取可见的那个」处理 |
+| 落地做法（机票） | `FlightSearchPage.select_date()`：开日历 → 读可见月份 → 按方向点箭头直到目标月出现 → 按「年+月」定位月份块 → 块内点纯数字日格 → 点外地空白收面板 → **回读 input 必须等于目标日期**，不等就抛错并说明原因 |
+| 落地做法（酒店） | `HotelSearchPage._goto_month()` + `_pick_day()`，同一套「先翻月再点」；`close_calendar()` 改为点空白 + 断言 |
+| 日期置灰 | 日格 `span.date-d` 的 class 恒为 `date-d`，状态全挂在父节点 `div.date-day` 上。代码里对父 class 里的 `disab / not-allowed / forbid / invalid` 做防御性报错，但**真正判「能不能选」的是点完回读 input**。⚠️[未查实] 过去/不可售日期到底带哪个 token —— 取证当天是月初 1 号，本月没有过去日期可当样本 |
+| 未覆盖 | 火车票的 `TrainSearchPage._goto_month` 只支持**向后**翻（`›`，最多 3 次），且月份标签不带年份。本期火车票数据都在当月，未触发；要跨年/往回翻得另做（探针未取证） |
+| 销号条件 | 不需要销号：这是「按站点真实行为实现」，不是限制。若站点改成「日历总是从今天起渲染」，翻月循环会自然不再执行 |
+

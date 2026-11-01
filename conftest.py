@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import re
 import time
 import warnings
 from pathlib import Path
@@ -24,12 +26,36 @@ from playwright.sync_api import Browser, BrowserContext, Page
 from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
 from pages.train_search_page import WidgetUnavailable
+from utils.cleaner import clean_old_reports
+from utils.diagnostics import diagnostics_of, forget_page, instrument_page
+from utils.logger import get_logger, log_file_path
 
 # ---------------------------------------------------------------- 会话级
 
 def pytest_configure(config: pytest.Config) -> None:
     settings.ensure_dirs()
     config.addinivalue_line("markers", "smoke: 只打开页面、检测风控、记录标题与 URL，不做任何交互")
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """会话最早期：建日志、清旧产物、把这次运行的关键条件记一行。
+
+    为什么放 `sessionstart` 而不是某个 fixture 里：清理必须在**任何文件写入之前**
+    完成，否则刚创建的新日志可能被当成「旧文件」参与统计；而 fixture 是按用例
+    惰性触发的，第一条用例是什么不确定，卡不住这个时机。
+    """
+    log = get_logger()
+    log.info("=" * 72)
+    log.info("测试会话启动｜headless=%s｜base_url=%s", settings.HEADLESS, settings.base_url())
+    log.info("日志文件：%s", log_file_path())
+    state = settings.auth_state_path()
+    log.info("登录态：%s（%s）", "存在" if state.exists() else "缺失",
+             state.name if state.exists() else "登录态轨道将 skip")
+    # 清理失败不允许影响会话：cleaner 自己吞掉了所有异常，这里再加一层保险。
+    try:
+        clean_old_reports()
+    except Exception as exc:                      # noqa: BLE001
+        log.warning("清理旧产物时出错（已忽略）：%s", exc)
 
 
 # ---------------------------------------------------------------- 统计口径
@@ -42,13 +68,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     scope=ui_auth   → 登录态轨道（2026-11-01 新增）。**刻意不并入上面两条**：
                       它依赖一份人工扫码产生的凭据，CI 里永远 skip，
                       混进任何一条 ratio 序列都会让分母变成「看有没有扫码」。
+    scope=ui_e2e    → 跨模块串联轨道（2026-11-01 新增）。实验条件是「一个 context
+                      连续跑完三站」，与上面每条一个干净 context 的形态互斥，
+                      所以也单列一条，不与 ui_auth 合并。
     scope=unit      → 数据层单测，门禁必须拒收
 
     **为什么按标记分轨而不是共用一个 ui**（裁决 2026-11-01）：两条轨道打的是
     两个站点，拦截率不可比。共用一个 scope 时，酒店那条 25% 会把火车票的
     1.0 序列打断——G3（连续 3 次 ≥0.3）和 G4（连续 7 天 ≥0.1）会跨轨道串味。
-    标记优先取 `hotels`：酒店用例同时带 `ui`（也算浏览器用例），必须先判细分的那条。
-    标记优先级从高到低：auth > hotels > ui > unit（越细分越靠前）。
+    标记优先取细分的那条：e2e > auth > hotels > ui > unit。
 
     为什么不用目录名 / classname 判断：junit 的 classname 是 rootdir 相对路径，
     在别的 rootdir 下跑一次就变；`user_properties` 是跟着用例走的，与调用方式无关。
@@ -56,7 +84,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     `<properties><property name="scope" value="ui"/></properties>`，pass / xfail / fail 三种结果都写。
     """
     for item in items:
-        if item.get_closest_marker("auth"):
+        if item.get_closest_marker("e2e"):
+            scope = "ui_e2e"
+        elif item.get_closest_marker("auth"):
             scope = "ui_auth"
         elif item.get_closest_marker("hotels"):
             scope = "ui_hotels"
@@ -79,11 +109,42 @@ def browser_type_launch_args(browser_type_launch_args):
     暴露给站点的身份。两者边界见 config/settings.py 的 BROWSER_UI_ARGS 注释。
     """
     existing = list(browser_type_launch_args.get("args") or [])
+    # `--start-maximized` 已在 settings.BROWSER_UI_ARGS 里（与探针共用同一份）。
+    # 与 _common_context_args 的 no_viewport 是**一对**，缺一个就不生效：
+    # 只有 --start-maximized 没有 no_viewport → 窗口最大了，但页面仍按固定视口排版；
+    # 只有 no_viewport 没有 --start-maximized → 视口跟随窗口，而窗口是默认大小。
     return {
         **browser_type_launch_args,
         "headless": settings.HEADLESS,
         "args": [*existing, *settings.BROWSER_UI_ARGS],
     }
+
+
+def _common_context_args() -> dict:
+    """context 的公共参数（function 级与 session 级两处共用）。
+
+    抽出来的理由不是整洁：session 级共享 context 不能依赖
+    `browser_context_args`（那是 function 级 fixture，依赖它会 ScopeMismatch），
+    所以它只能自己拼一份参数。两处各拼一份的话，视口/语言/时区的口径迟早漂移，
+    而漂移的表现是「共享会话里布局与单用例里不一样」这种极难查的问题。
+
+    视口策略（2026-11-01 用户追加要求「物理最大化」）：
+      · 有头 → `no_viewport=True` + 启动参数 `--start-maximized`，
+        视口完全跟随物理窗口。**不能同时写 viewport** —— 一旦给了固定 viewport，
+        Playwright 会用它覆盖窗口内容区，最大化就白做了；
+      · 无头 → 仍然固定 `settings.VIEWPORT`。headless 没有窗口可最大化，
+        `no_viewport` 会把页面退到 1280×720，比 1920 更小，
+        而本站的筛选区的折叠/平铺正好在这两个宽度之间切换。
+    """
+    args = {
+        "locale": settings.LOCALE,
+        "timezone_id": settings.TIMEZONE_ID,
+        "base_url": settings.base_url(),
+        # permissions=[] 是预先拒绝位置权限，理由见下面 browser_context_args 的注释。
+        "permissions": [],
+        **settings.context_view_args(),
+    }
+    return args
 
 
 @pytest.fixture
@@ -98,14 +159,7 @@ def browser_context_args(browser_context_args):
     让失败原因从「站点行为」变成「弹窗挡路」。空列表 = 预先拒绝，等价于用户点「不允许」，
     对站点的可见结果与用户拒绝完全一致。
     """
-    args = {
-        **browser_context_args,
-        "viewport": settings.VIEWPORT,
-        "locale": settings.LOCALE,
-        "timezone_id": settings.TIMEZONE_ID,
-        "base_url": settings.base_url(),
-        "permissions": [],
-    }
+    args = {**browser_context_args, **_common_context_args()}
     if settings.AUTH_GLOBAL and settings.auth_state_path().exists():
         # 默认关，理由见 config/settings.py 的 AUTH_GLOBAL 注释。
         # 文件不存在时静默跳过：全局挂载不该因为缺一份本地凭据就让所有用例炸。
@@ -210,7 +264,9 @@ def auth_page(auth_context: BrowserContext) -> Page:
     """登录态 context 里的页面。"""
     page = auth_context.new_page()
     page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
+    instrument_page(page, label="auth_page")
     yield page
+    forget_page(page)
     page.close()
 
 
@@ -256,7 +312,9 @@ def auth_trains_context(
 def auth_trains_page(auth_trains_context: BrowserContext) -> Page:
     page = auth_trains_context.new_page()
     page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
+    instrument_page(page, label="auth_trains_page")
     yield page
+    forget_page(page)
     page.close()
 
 
@@ -271,6 +329,127 @@ def auth_trains_base_page(auth_trains_page: Page) -> BasePage:
     return BasePage(auth_trains_page, base_url=settings.base_url())
 
 
+# ---------------------------------------------------------------- 共享会话（e2e 串联轨道，2026-11-01）
+#
+# 用户 2026-11-01 要求：**一次登录、一个浏览器、一个 context、一个 page**，
+# 依次跑完酒店 → 火车 → 机票，多组数据参数化，单条失败不中断后续。
+#
+# 为什么不能直接用 pytest-playwright 的 `page`：它是 function 级 —— 每条用例新建
+# context，9 组数据就是 9 次冷启动 + 9 次加载 storage_state，与「严禁每个用例
+# 重新启动浏览器或重新登录」正面冲突。
+#
+# 与 `auth_context` 的分工：auth_context 是 function 级，一条用例一个干净 context，
+# 适合「这条用例能否登录」类断言；共享会话适合「一条流程走到底」。两者并存，
+# 谁也替代不了谁。
+
+class SharedSession:
+    """一个 session 只开一个 context、一个 page；page 崩了重建 page，context 不动。
+
+    为什么 page 可以重建而 context 不能：
+      page 出问题是单页问题（超时、被重定向到错误页），重开一页就够；
+      context 一换就得重新加载 storage_state —— 那等于重新登录一次，
+      正是这条轨道要避免的事。重建次数记进报告，异常增长能被看见。
+    """
+
+    def __init__(self, context: BrowserContext) -> None:
+        self.context = context
+        self._page: Page | None = None
+        self.rebuilds = 0
+
+    def get_page(self) -> Page:
+        if self._page is None:
+            self._page = self.context.new_page()
+        elif self._page.is_closed():
+            self._page = self.context.new_page()
+            self.rebuilds += 1
+        self._page.set_default_timeout(settings.DEFAULT_TIMEOUT_MS)
+        self._page.set_default_navigation_timeout(settings.NAV_TIMEOUT_MS)
+        # 共享 page 也要挂诊断：e2e 轨整场只有一个 page，漏挂等于整轨没有 JS/4xx 证据。
+        instrument_page(self._page, label="shared_page")
+        return self._page
+
+    def drop_extra_pages(self, keep: Page) -> None:
+        """关掉意外弹出的标签页。
+
+        不关的后果很具体：站点把某次搜索开在新标签里，下一次 `goto` 仍作用在旧页上，
+        失败会表现成「搜索没结果」，排查方向从「会话」直接歪到「选择器」。
+        """
+        for other in list(self.context.pages):
+            if other is not keep and not other.is_closed():
+                other.close()
+
+    def close(self) -> None:
+        if self._page is not None and not self._page.is_closed():
+            self._page.close()
+
+
+@pytest.fixture(scope="session")
+def shared_context(browser: Browser) -> BrowserContext:
+    """session 级登录态 context。缺 state 时整条轨道 skip（AUTH-06，不进分母）。
+
+    Trace 说明：pytest-playwright 的 `--tracing=retain-on-failure` 只作用于它自己
+    造的函数级 context，**管不到这个手搓的 session context**，所以 e2e 轨默认没有
+    trace。要录就设 `E2E_TRACE=1`，失败时存到 `reports/trace/<用例>.zip`。
+    默认关的理由很实在：整场只有一个 context，全程录制能到几十 MB，
+    而 e2e 的失败现场已有截图 + DOM + 4xx 清单（见 `_report_diagnostics`）。
+    """
+    state = _require_auth_state("www", "AUTH-06")
+    context = browser.new_context(**{**_common_context_args(), "storage_state": str(state)})
+    if os.getenv("E2E_TRACE") == "1":
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            context._e2e_trace_active = True      # type: ignore[attr-defined]
+            get_logger().info("trace 已开启（E2E_TRACE=1），失败时保存")
+        except Exception as exc:                  # noqa: BLE001
+            get_logger().warning("trace 启动失败（忽略）：%s", exc)
+    yield context
+    context.close()
+
+
+@pytest.fixture(scope="session")
+def shared_session(shared_context: BrowserContext) -> SharedSession:
+    session = SharedSession(shared_context)
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def shared_page(shared_session: SharedSession, request: pytest.FixtureRequest) -> Page:
+    """共享 context 里那个页面的**当前**实例。
+
+    名字是 function 级，但浏览器与 context 都是 session 级 —— 调用方拿到的是同一个
+    会话里的同一个页；只有页真的崩了才重建（重建次数写进报告）。
+    """
+    page = shared_session.get_page()
+    # 把真实视口尺寸写进报告：最大化到底生效没有，靠这个数字，不靠感觉。
+    # 期望值 = 物理窗口内容区（1920 屏常见 1536~1920，取决于 DPI 缩放）。
+    try:
+        width, height = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+        request.node.add_report_section(
+            "setup",
+            "视口",
+            f"innerWidth×innerHeight = {width}×{height}\n"
+            f"物理最大化：{settings.window_maximized()}（HEADED={not settings.HEADLESS}）",
+        )
+    except Exception:
+        pass
+    yield page
+    shared_session.drop_extra_pages(page)
+
+
+def check_waf_block(page: Page) -> BlockSignal | None:
+    """用户需求里点名的守卫：命中风控返回信号，未命中返回 None。
+
+    **复用 `BasePage.detect_block()`，不另写一套判据。** 两套判据的后果很具体：
+    守卫说「是 WAF」、用例说「断言失败」，然后没人知道该信哪个。
+
+    与「登录墙」不是一回事，别混：
+      · `passport.ctrip.com` = 要求登录，属业务门槛（`looks_like_login_wall`）；
+      · 风控域 / 滑块 / `whaleguard` = 对方拒绝访问，属 blocked（本函数 + BLOCK_HOST_PATTERNS）。
+    """
+    return BasePage(page).detect_block()
+
+
 @pytest.fixture
 def base_page(page: Page, request: pytest.FixtureRequest) -> BasePage:
     """页面对象基类实例，并登记到 item 上供失败钩子取证。"""
@@ -282,10 +461,18 @@ def base_page(page: Page, request: pytest.FixtureRequest) -> BasePage:
 # ---------------------------------------------------------------- blocked → xfail
 
 @pytest.fixture
-def blocked_guard(request: pytest.FixtureRequest, base_page: BasePage):
+def blocked_guard(request: pytest.FixtureRequest):
     """把 BlockedByAntiBot 转成 xfail，并留下证据。
 
     只有 BlockedByAntiBot 会被转；AssertionError / TimeoutError 等照常 fail。
+
+    **取证对象是惰性取的**（2026-11-01 改）：优先用用例自己登记在
+    `item._base_page` 上的页面对象，没有才回退去拉 `base_page` fixture。
+    原先直接在签名里依赖 `base_page`，副作用有两个，都是实打实的：
+      · 登录态轨道（`auth_page`/`auth_trains_page`）每调一次 guard 就**多起一个
+        匿名浏览器 context** —— 而 guard 本身对匿名页毫无用处；
+      · blocked 截图截的是那个空白匿名页，不是真正被拦的页面，取证等于白取。
+    惰性取法对既有匿名用例零影响：它们没登记 `_base_page`，照样回退到 `base_page`。
     """
 
     @contextlib.contextmanager
@@ -294,7 +481,10 @@ def blocked_guard(request: pytest.FixtureRequest, base_page: BasePage):
             yield
         except BlockedByAntiBot as exc:
             request.node._blocked_signal = exc.signal       # type: ignore[attr-defined]
-            paths = base_page.capture(request.node.nodeid + "__blocked")
+            holder = getattr(request.node, "_base_page", None)
+            if holder is None:
+                holder = request.getfixturevalue("base_page")
+            paths = holder.capture(request.node.nodeid + "__blocked")
             detail = (
                 f"判定：{exc.signal.kind}\n命中：{exc.signal.detail}\n"
                 f"url：{exc.url}\ntitle：{exc.title}\n"
@@ -336,6 +526,30 @@ def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
 
 # ---------------------------------------------------------------- 失败取证
 
+def _pages_of(item: pytest.Item) -> list[Page]:
+    """用例可能用到的 page，按「最可能是现场」的顺序返回。
+
+    先看用例自己登记的页面对象（`_base_page`），再退回到 fixture 里的裸 page。
+    后者覆盖「还没构造页面对象就挂了」的情况 —— 那种失败以前一张图都没有。
+    """
+    pages: list[Page] = []
+    holder: BasePage | None = getattr(item, "_base_page", None)
+    if holder is not None:
+        pages.append(holder.page)
+    for name in ("shared_page", "auth_page", "auth_trains_page", "page"):
+        candidate = item.funcargs.get(name)
+        if isinstance(candidate, Page) and candidate not in pages:
+            pages.append(candidate)
+    alive: list[Page] = []
+    for page in pages:
+        try:
+            if not page.is_closed():
+                alive.append(page)
+        except Exception:
+            continue
+    return alive
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     report = yield
@@ -350,18 +564,101 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         report.sections.append(("blocked", f"{blocked.kind}: {blocked.detail}"))
 
     base_page: BasePage | None = getattr(item, "_base_page", None)
-    if report.failed and base_page is not None:
-        page = base_page.page
-        try:
-            url, title = page.url, page.title()
-        except Exception:
-            url, title = "(页面已关闭)", "(不可读)"
-        paths = base_page.capture(item.nodeid)
-        report.sections.append(
-            (
-                "失败现场",
-                f"url：{url}\ntitle：{title}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
-            )
-        )
+    if report.failed:
+        _report_failure_scene(item, report, base_page)
+        _report_diagnostics(item, report)
 
     return report
+
+
+def _report_failure_scene(
+    item: pytest.Item, report: pytest.TestReport, base_page: BasePage | None
+) -> None:
+    """失败现场：URL + title + 视口/整页两张截图。
+
+    **两条来源都要覆盖**（2026-11-01 补）：以前只处理 `_base_page`，结果是
+    「用例还没构造页面对象就失败」时一张图都没有 —— 而这类失败（比如 goto 就挂了）
+    恰恰最需要图。没有页面对象时，退回到 fixture 里的裸 page。
+    """
+    pages = _pages_of(item)
+    target = base_page.page if base_page is not None else (pages[0] if pages else None)
+    if target is None:
+        return
+    try:
+        url, title = target.url, target.title()
+    except Exception:
+        url, title = "(页面已关闭)", "(不可读)"
+
+    capturer = base_page if base_page is not None else BasePage(target)
+    try:
+        paths = capturer.capture(item.nodeid)
+    except Exception:                                  # noqa: BLE001
+        paths = []
+    report.sections.append(
+        (
+            "失败现场",
+            f"url：{url}\ntitle：{title}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
+        )
+    )
+    get_logger().error("失败现场｜url=%s｜title=%s｜截图=%s", url, title, paths or "(截图失败)")
+
+
+def _report_diagnostics(item: pytest.Item, report: pytest.TestReport) -> None:
+    """把 JS 报错 / HTTP≥400 / 请求失败写进失败报告，并同步落一行日志。
+
+    没有页面对象也要跑：这一段的用途正是「连页面对象都没造出来就失败了」。
+    """
+    log = get_logger()
+    pages = _pages_of(item)
+    if not pages:
+        # 数据层单测没有页面，往它的报告里塞一段「没有页面诊断」纯属噪音。
+        log.debug("用例失败（无页面）：%s", item.nodeid)
+        return
+
+    chunks: list[str] = []
+    for page in pages:
+        diag = diagnostics_of(page)
+        if diag is None:
+            continue
+        try:
+            url = page.url
+        except Exception:
+            url = "(不可读)"
+        chunks.append(f"—— {diag.label} @ {url}\n{diag.summary()}")
+
+    if not chunks:
+        chunks.append("（页面存在但没挂诊断监听：页面可能不是由本工程的 fixture 创建的）")
+
+    trace_path = _save_e2e_trace(item)
+    if trace_path:
+        chunks.append(f"trace：{trace_path}")
+
+    report.sections.append(("页面诊断", "\n\n".join(chunks)))
+    log.error("用例失败：%s", item.nodeid)
+    for chunk in chunks:
+        log.error("%s", chunk)
+
+
+def _save_e2e_trace(item: pytest.Item) -> Path | None:
+    """失败时把 e2e 共享 context 的 trace 落盘，并立刻重新开始录制。
+
+    只有 `E2E_TRACE=1` 且 context 还活着才做。任何异常都吞掉：trace 是辅助证据，
+    让它把「失败原因」挤掉就本末倒置了。
+    """
+    context: BrowserContext | None = item.funcargs.get("shared_context")
+    if context is None or not getattr(context, "_e2e_trace_active", False):
+        return None
+    settings.ensure_dirs()
+    safe = re.sub(r"[^0-9A-Za-z_.\-]+", "_", item.nodeid)[:100] or "trace"
+    path = settings.TRACE_DIR / f"{safe}.zip"
+    try:
+        context.tracing.stop(path=str(path))
+    except Exception as exc:                      # noqa: BLE001
+        get_logger().warning("trace 保存失败（忽略）：%s", exc)
+        return None
+    try:                                          # 继续录后面的用例
+        context.tracing.start(screenshots=True, snapshots=True, sources=False)
+    except Exception:                             # noqa: BLE001
+        context._e2e_trace_active = False         # type: ignore[attr-defined]
+    get_logger().info("trace 已保存：%s", path)
+    return path

@@ -229,8 +229,9 @@ verdict: YELLOW   触发: G5
    编号化记录见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)。
 2. 功能用例需要日期生效，而日期依赖上述 widget，所以拦截出现前也未必稳定通过。
 3. `min_results` 只是下界。末班车时段同区间可能只剩 1 条，这是正常业务形态，不是缺陷。
-4. 目前覆盖国内火车票查询 + 酒店搜索一期（目的地 / 日期 / 房间及住客 / 搜索四字段）；
-   机票未实现；登录态见第 5 条。
+4. 目前覆盖国内火车票查询 + 酒店搜索一期（目的地 / 日期 / 房间及住客 / 搜索四字段）
+   + **国内机票单程查询**（2026-11-01 实现，`suites/e2e` 串联轨覆盖，见第十节）；
+   登录态见第 5 条。
 5. **登录态分两条轨**（2026-11-01 裁决变更，此前是「一律不碰」）：
    - **匿名轨**（火车票 `suites/thirdparty`、酒店 `suites/hotels`）：仍然不登录、
      不提交订单、不进入支付流程。这两条轨道的全部断言都以「匿名访问」为前提。
@@ -238,6 +239,13 @@ verdict: YELLOW   触发: G5
      **人工扫码产生、绝不入库**的 storageState 验证「手上这份会话还能不能用」。
      它不碰匿名轨的任何断言，也不进 CI —— 缺 state 时固定
      `skip("known-limit: AUTH-01 / AUTH-03 …")`，不进分母。
+   - **`auth` 轨里的酒店搜索**（2026-11-01 新增，2 条 × 3 组数据，数据与匿名轨共用
+     `data/hotels/search_cases.yaml`）：登录态下走「首页填表 → 提交 → 落
+     `hotels.ctrip.com/hotels/list` → 卡片 ≥1」，以及「结果页点左侧竖排导航的
+     **酒店**回首页 → 改日期与晚数 → 再搜」。后者是用户实际操作路径（结果页顶部
+     那个搜索框回填上次条件，改城市要先清空）。匿名轨的
+     `test_submit_then_list_renders` **仍然保持 skip** —— 它要回答的是「匿名能拿到
+     什么」，给它挂 state 会把那条序列变成「今天扫没扫码」，两者不互相替代。
 
    **两站要各采一份**（2026-11-01 实测：登录态不互通）：
 
@@ -281,3 +289,43 @@ playwright 版本与已装内核版本必须一致（1.64.1 要 chromium-1248，
 不算通过也不算失败，是「预期内的失败」。看 `reason` 前缀：
 `blocked:` 是被对方拦下，`known-limit:` 是我们自己承认的限制（这两者都会让 CI 保持绿，
 但都不算 `effective_pass`）。两种前缀之外的 xfail/skip 会被门禁判为口径不成立。
+
+---
+
+## 十、日志与诊断（排障入口）
+
+一条失败用例要能回答四个问题：**在哪挂的、页面长什么样、前端报了什么、请求被谁挡了**。
+四件事分别由四个组件承担，全部默认开启：
+
+| 组件 | 位置 | 产出 |
+|---|---|---|
+| 统一日志 | `utils/logger.py` | 控制台 INFO + `reports/logs/run_<时间戳>.log`（DEBUG，含 `模块:行号`），10MB × 5 份轮转 |
+| 页面诊断 | `utils/diagnostics.py` | 每个 page 的 JS 报错 / HTTP ≥400 / 请求失败，失败时写进报告 |
+| 失败取证 | `conftest.py` 的 `pytest_runtest_makereport` | `reports/screenshots/<用例>__viewport.png` + `__full.png`，附 URL / title |
+| Trace | `pytest.ini` 的 `--tracing=retain-on-failure` | `reports/trace/<用例>/trace.zip`（函数级 context）；e2e 共享 context 需 `E2E_TRACE=1` |
+
+要点：
+
+- **日志一律过 `redact()`**。`cticket`、`Cookie`、`token`、手机号在写盘前就打码 ——
+  日志会被贴进 issue 和提交记录，凭据进去就是事故。
+- **诊断只观察、不拦截**。挂的是 `page.on("console"/"pageerror"/"response"/"requestfailed")`，
+  没有 `route`。会改请求的「诊断」等于改被测对象。
+- **URL 记录一律去掉 query**（`host/path`）。query 里常带凭据，而定位「哪个接口挂了」不需要它。
+- **未捕获异常走 `pageerror`，不走 `console`**（2026-11-01 实测）。只挂 console 会漏掉
+  「组件初始化就抛异常」这类最要命的失败。三条通道的可用性由
+  `tools/probes/probe_diagnostics.py` 端到端验过（console error / pageerror / 4xx / requestfailed 全命中）。
+- **数据层单测不产生页面诊断段**：没有页面的失败只记一行 debug，不往报告里塞噪音。
+
+旧产物清理（`utils/cleaner.py`，`pytest_sessionstart` 调用）：
+
+```bash
+python -m pytest suites/e2e            # 默认清理 reports/ 下 24 小时前的文件
+E2E_CLEAN_HOURS=72 python -m pytest    # 改阈值
+E2E_CLEAN_DRY_RUN=1 python -m pytest   # 只统计不删
+E2E_CLEAN_DISABLE=1 python -m pytest   # 完全跳过（要留证据排查时）
+```
+
+安全边界：只清 `reports/` 且必须解析在项目根内（路径写错就拒绝执行，不删任何东西）；
+`PermissionError`（Windows 下被 Trace Viewer 占用）跳过并计数；
+`logs/`、`screenshots/`、`trace/`、`html/` 这四个一级目录即使清空也不删。
+行为由 `tools/tests/test_cleaner.py` 锁死（12 条：过期判定 / 演练 / 禁用 / 项目外拒绝 / 脱敏）。

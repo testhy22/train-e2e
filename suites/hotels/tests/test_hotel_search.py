@@ -113,10 +113,24 @@ def test_list_page_renders_with_full_params(page, blocked_guard):
 
 
 @pytest.mark.skip(
-    reason="known-limit: K-04 首页提交路径被 passport 接管，『提交→列表渲染』的端到端不可验证"
+    reason="known-limit: K-04 本轨跑的是匿名态，首页提交必被 passport 接管；"
+    "登录态下的同一条端到端见 suites/auth/tests/test_hotel_login_search.py"
 )
 def test_submit_then_list_renders(page, blocked_guard):
-    """有合法登录态后启用。现在留着，是为了让这条缺口可见，而不是删掉假装没有。"""
+    """**匿名**轨道的「提交 → 列表渲染」，永不启用。
+
+    2026-11-01 更新：这条曾经写「有合法登录态后启用」。登录态轨道建成后实测
+    （`reports/probe_hotel_auth/20261101-175636/`）带 state 提交**能**进
+    `hotels.ctrip.com/hotels/list` 并出 13 张卡片 —— 但那是**换了一张脸**之后的结果。
+
+    这条用例所在的轨道（scope `ui_hotels`）要回答的是「匿名能拿到什么」。
+    在这里挂 storage_state，会把这条序列变成「今天扫没扫码」，
+    与 K-04 的实验条件直接冲突（`config/settings.py` 的 AUTH_GLOBAL 注释写了同一件事）。
+
+    所以要验登录态下的同一个动作，去 `suites/auth/tests/test_hotel_login_search.py`：
+    那边 context 独立、scope 独立（`ui_auth`）、缺 state 时 `skip("known-limit: AUTH-01")`。
+    保留这条 skip 是为了让「匿名态这条缺口」一直可见，而不是删掉假装它不存在。
+    """
     hotel = HotelSearchPage(page)
     with blocked_guard():
         hotel.open()

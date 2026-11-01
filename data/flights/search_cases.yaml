@@ -1,0 +1,78 @@
+# 机票搜索用例数据（单程 / 国内）
+#
+# 字段
+#   id                  用例标识，**必须是 ASCII**（理由同酒店：中文 id 进 junit 会变 \u 转义）
+#   name                中文名，只用于报告展示，不参与判定
+#   from_city/to_city   城市名，直接输入到出发地/目的地输入框
+#   depart_offset_days  相对今天的天数（1…60，工程边界，不是业务口径）
+#   adults              成人数，默认 1
+#   tags                `-k` 过滤用，必填且非空
+#   expected            **本套数据故意留空**
+#
+# 为什么 expected 是空的：机票这边没有「无法由输入推出」的硬预期。
+#   酒店要存 city_id（站点内部城市编号，猜不出来），火车票要存 http_status
+#   （无头被拦 432，见 K-05）；机票的落点是
+#   `/online/list/oneway-<三字码>-<三字码>?depdate=YYYY-MM-DD`，
+#   其中只有三字码是站点口径。但三字码目前只实测了 sha-bjs 与 can-ctu 两组，
+#   另外两组没测 —— 与其按「看着像」把 szx-xiy 写进预期（那是在编数据），
+#   不如不写：用例只断言 depdate 与卡片数，三字码记进报告，等实测补一轮再落库。
+#
+# 为什么选这四组：
+#   覆盖「一线枢纽互飞 / 华南→西南 / 华南→西北 / 华东→西南」，四组都不在同一个
+#   大区对，避免四组数据其实在验同一件事；
+#   偏移量 7/14/21/30 天同时覆盖「本月内 / 跨月」两种日历形态 ——
+#   日历同屏渲染两个月，跨月那组专门用来暴露「月份块没限定」的错（探针 29 踩过）。
+
+version: 1
+suite: flights
+marker: e2e
+
+cases:
+  - id: sha-bjs
+    name: 上海-北京 单程
+    from_city: 上海
+    to_city: 北京
+    depart_offset_days: 7
+    adults: 1
+    tags: [smoke, hub]
+    expected: {}
+
+  - id: can-ctu
+    name: 广州-成都 单程
+    from_city: 广州
+    to_city: 成都
+    depart_offset_days: 14
+    adults: 1
+    tags: [smoke, cross-region]
+    expected: {}
+
+  - id: szx-xiy
+    name: 深圳-西安 单程
+    from_city: 深圳
+    to_city: 西安
+    depart_offset_days: 21
+    adults: 1
+    tags: [smoke, cross-region]
+    expected: {}
+
+  - id: hgh-ckg
+    name: 杭州-重庆 单程（跨月）
+    from_city: 杭州
+    to_city: 重庆
+    depart_offset_days: 30
+    adults: 1
+    tags: [cross-month]
+    expected: {}
+
+  # 更远的跨月组（2026-11-01 追加）：偏移 45 天会落在「今天所在月的下下个月」。
+  # 与 T+30 那组的区别不是数字更大，而是它**保证**日历初始的两个月块里没有目标月，
+  # 从而每次都真的走一遍翻月循环（K-09）。只有这一组存在时，
+  # 「先选远期再选近期」这种真实失败顺序才会在随机执行顺序下被覆盖到。
+  - id: ctu-szx
+    name: 成都-深圳 单程（远期跨月）
+    from_city: 成都
+    to_city: 深圳
+    depart_offset_days: 45
+    adults: 1
+    tags: [cross-month]
+    expected: {}
