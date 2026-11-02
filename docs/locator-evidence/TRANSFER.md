@@ -31,6 +31,11 @@ https://trains.ctrip.com/webapp/train/list?ticketType=2&dStation=汉口&aStation
 本轨道**只用** `ticketType / dStation / aStation / dDate` 四个参数。「指定中转城市」不传 ——
 四组探测数据都没用到它，不凭想象加参数。
 
+> **2026-11-02 变更**：入口不再用 URL 直达（用户裁决子菜单必须点按钮进）。
+> 现在流程是 `open() → select_mode("transfer") → 填两地 → 点日期 → 点搜索`，
+> 上表的 URL 参数**只作为断言依据**（`url_ticket_type()` / `url_depart_date()` 回读）。
+> 详见 `FORM-MODE.md`；「指定中转城市」留空实测可搜（201 张方案卡）。
+
 ---
 
 ## 二、页面结构（实测 DOM）
@@ -120,7 +125,7 @@ https://trains.ctrip.com/webapp/train/list?ticketType=2&dStation=汉口&aStation
 
 | 方案写法 | 实测 | 后果 |
 |---|---|---|
-| `page.locator("text=中转")` 当单选框点 | 首页「中转」是个 **`button`**（不是 radio），且点击后还要填 4 个控件 | 走 URL 直达，不点它 |
+| `page.locator("text=中转")` 当单选框点 | 首页「中转」是个 **`button`**（不是 radio，选中态落在 `li.cur`），且点击后还要填 4 个控件 | ~~走 URL 直达，不点它~~ → **2026-11-02 用户裁决改为必须点它**，4 个控件已探完（`FORM-MODE.md`），入口改走 `select_mode("transfer")` |
 | `input[placeholder='出发城市']` | 本项目表单实际是 `#label-departStation` 那套 | 选择器不存在 |
 | `.transfer-list-item` | **不存在**。卡片就是 `.card-white.list-item` | 计数恒为 0 |
 | `text=中转方案推荐` | 真实存在，但它是 `<h3>`，父容器 `.transfer-box` | 可用，取 `.transfer-box h3` 更稳 |

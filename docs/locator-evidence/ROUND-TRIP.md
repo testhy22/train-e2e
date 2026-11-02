@@ -91,7 +91,8 @@ div.mid
 | 时段 chip 的归属容器 | ⚠️**未查实**：`div.item` 能找到（probe3 第二次），但"限定在第 1 栏内点击"两次都超时；`closest('div.return-list')` 对两栏的 chip 都返回 0，说明它不在 `return-list` 子树里 | 时段维度**不做硬断言**，只统计结果里落在偏好时段的趟数（`prefer_window` 软指标） |
 | 车型筛选的 URL 参数取值 | ⚠️**未查实**：截图里 `trainType=gaotie-don…` 被截断，实际枚举没探 | 车型只做"至少命中一种 + 字头分布"，不断言"结果里只有这些" |
 | 返程日是否受 15 天预售期限制 | 实测反证：截图 `dDate=2026-11-06&rDate=2026-12-09`（差 33 天）页面正常接受 | 数据校验对返程**不设上限**，只要求晚于出发日 |
-| 首页「往返」单选 + 返程日历 | ⚠️**未探测** | 往返走 URL 直达；首页表单那条路由单程冒烟守着 |
+| 首页「往返」单选 + 返程日历 | ✅**2026-11-02 已探测**（见 `FORM-MODE.md`）：三态是 `ul.search-select > li > button`，返程日历 wrap 是 `.widget-calendar-back-wrap` | 往返改走首页表单点按钮进入，不再 URL 直达 |
+| 结果页滚动分页 / 懒加载 | ⚠️**未探测** | 用例只取首屏卡片，不做滚动加载断言；`TODO.md` 记一条待补 |
 
 ---
 
@@ -99,12 +100,27 @@ div.mid
 
 | 模式 | 命令 | 结果 | 判读 |
 |---|---|---|---|
-| 无头 | `HEADED=0 HUMAN=0 E2E_CLEAN_HOURS=72 pytest suites/thirdparty/tests/test_train_round_trip.py -q -rx` | **9 xfailed / 0 passed，12.23s** | 9 条逐条原因均为 `blocked: waf_block（whaleguard）`，**无一进入 DOM 断言**（1.4s/条 ⇒ 在 `open_round_trip` 的 `assert_not_blocked()` 就被拦）。属 K-05 已知限制，不是本轨道代码问题 |
-| 有头 | `HEADED=1 HUMAN=0 E2E_CLEAN_HOURS=72 pytest …` | **9 passed，107.84s** | 同一批数据、同一 URL 直达路径；单条 8~14s，说明确实走了两栏取数与车次号覆盖率断言 |
+| 无头 | `HEADED=0 HUMAN=0 E2E_CLEAN_HOURS=72 pytest suites/thirdparty/tests/test_train_round_trip.py -q -rx` | **9 xfailed / 0 passed，12.23s** | 9 条逐条原因均为 `blocked: waf_block（whaleguard）`，**无一进入 DOM 断言**（1.4s/条 ⇒ 在入口方法的 `assert_not_blocked()` 就被拦；该入口现名 `search_round_trip`，旧名 `open_round_trip` 已于 2026-11-02 删除）。属 K-05 已知限制，不是本轨道代码问题 |
+| 有头 | `HEADED=1 HUMAN=0 E2E_CLEAN_HOURS=72 pytest …` | **9 passed，107.84s** | 同一批数据、同一入口路径；单条 8~14s，说明确实走了两栏取数与车次号覆盖率断言 |
 
 结论：
 
 1. **无头不可用的原因不是视口/UA，而是「有没有真实显示设备」** —— 真视口问题会表现为「页面出来了但元素不可见」，这里连页面都没拿到（否则单条不可能 1.4s 就结束）。
 2. **不进 CI 的顾虑不成立**：`.github/workflows/ci.yml:75-101` 用 `xvfb` 提供虚拟屏 + `HEADED=1 HUMAN=0` 跑 `-m ui`，本来就是有头模式，不依赖无头。
 3. 因此**不引入 stealth / UA 伪装 / viewport 调整**去绕 WAF：与拦截机制无关（同机改一个开关就 200），且违反项目「不伪装身份」的硬约定（`TODO.md` 附录第 2 条）。
+
+---
+
+## 运行记录（2026-11-03 00:12，改走首页表单 + 拟人节奏）
+
+用户 2026-11-02 裁决「往返必须点按钮进，不许改 URL」，入口从 URL 直达改成
+`open() → select_mode("round") → select_city ×2 → select_date ×2 → submit()`。
+
+| 模式 | 命令 | 结果 | 判读 |
+|---|---|---|---|
+| 有头 + 拟人 | `HEADED=1 E2E_CLEAN_HOURS=72 pytest test_train_search.py test_train_round_trip.py test_train_transfer.py -q -rA` | **15 passed，308.88s** | 单程 3 + 往返 9 + 中转 3 全绿；往返由 54.29s（URL 直达）升到约 190s，增量**全部是表单交互**（每条 4 个控件 × 9 条） |
+| 有头（单条复跑） | 同上，只跑 `rt-wc-hk-samecity-back-T+8` | **1 passed，27.90s** | 修掉 K-11 变体（点选瞬间面板消失 → 15s click 超时）后通过，见 `FORM-MODE.md` §7.2 |
+
+`-rA` 里每条的 `操作链` 报告节都是 7 步（往返）/ 6 步（中转），末行固定输出
+`页面导航次数（只允许 open() 那一次）：1` —— 这是「子菜单零 URL 直达」的硬证据。
 4. 复跑命令固定带 `E2E_CLEAN_HOURS=72` 规避 K-12（清理器 4 个/秒）。**不要用 `E2E_CLEAN_DISABLE=1`**，那会让 `test_cleaner` 4 条全红。
