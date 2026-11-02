@@ -28,6 +28,8 @@ SENSITIVE = re.compile(r"(\b1[3-9]\d{9}\b|\b\d{17}[\dXx]\b|\b\d{15}\b)")
 # 落进数据就是把会变的东西钉成预期；断言只做「包含城市中文名」，中文名来自输入 city。
 HOTEL_EXPECTED_KEYS = {"city_id"}
 TRAIN_EXPECTED_KEYS = {"http_status", "title_contains"}
+# 往返用例的 expected 闭集与单程相同 —— 用例真正消费的键就这两个。
+TRAIN_ROUND_TRIP_EXPECTED_KEYS = {"http_status", "title_contains"}
 
 
 def common(cases, label: str) -> None:
@@ -106,3 +108,62 @@ def validate_train_cases(cases, today) -> None:
             f"{case.id}: expected.title_contains 不能为空"
         )
         assert case.depart_date == (today + timedelta(days=case.depart_offset_days)).isoformat()
+
+
+def validate_round_trip_cases(cases, today) -> None:
+    """往返用例数据全量校验（data/trains/round_trip_cases.yaml）。
+
+    与 `validate_train_cases` 分开写，因为**约束不同**，混在一起会互相污染：
+      · 单程只关心出发日与预售期；往返多一个 nights 与返程日；
+      · 返程日**不设预售期上限**（依据：2026-11-02 截图里 dDate→rDate 相差 33 天仍被接受），
+        所以这里不能照抄单程那条 `offset <= 15` 的断言到 nights 上。
+    """
+    common(cases, "trains_round_trip")
+    assert cases, "往返用例至少一条"
+
+    scopes = set()
+    anchors = set()
+    for case in cases:
+        assert case.from_city != case.to_city, f"{case.id}: 出发与到达不能相同"
+        assert case.depart_offset_days >= 3, (
+            f"{case.id}: 出发日偏移必须 >= +3（避免临售紧张导致的空结果），"
+            f"收到 +{case.depart_offset_days}"
+        )
+        assert case.depart_offset_days <= 15, (
+            f"{case.id}: 出发日偏移必须 <= +15（预售期），收到 +{case.depart_offset_days}"
+        )
+        assert case.nights >= 1, f"{case.id}: nights 必须 >= 1"
+        # 返程日必须严格晚于出发日 —— 同日往返在这个页面上不是「往返」而是「单程多买一张」
+        assert case.return_date > case.depart_date, (
+            f"{case.id}: 返程日 {case.return_date} 必须晚于出发日 {case.depart_date}"
+        )
+        assert case.min_results_each_leg >= 1, f"{case.id}: min_results_each_leg 必须 >= 1"
+        assert case.train_types, f"{case.id}: train_types 不能为空"
+        assert case.expected.keys() <= TRAIN_ROUND_TRIP_EXPECTED_KEYS, (
+            f"{case.id}: expected 里有没人消费的键 "
+            f"{sorted(set(case.expected) - TRAIN_ROUND_TRIP_EXPECTED_KEYS)}"
+        )
+        assert case.expected.get("http_status") == 200, (
+            f"{case.id}: 期望 http_status 应为 200 —— 无头下的 432 是 K-05 的环境问题，"
+            "不是这条数据该编码的东西"
+        )
+        assert case.expected.get("title_contains"), f"{case.id}: expected.title_contains 不能为空"
+        # 日期必须与今天自洽（weekday 锚点算出来的也要对得上）
+        assert case.depart_date == (
+            today + timedelta(days=case.depart_offset_days)
+        ).isoformat(), f"{case.id}: depart_date 与偏移量不自洽"
+        assert case.return_date == (
+            today + timedelta(days=case.depart_offset_days + case.nights)
+        ).isoformat(), f"{case.id}: return_date 必须等于出发日 + nights"
+        scopes.add(case.city_scope)
+        anchors.add(case.anchor)
+
+    # 覆盖度：这套数据存在的意义就是"多样性"，只剩跨城就是退化。
+    assert {"same_city", "cross_city", "long_haul"} <= scopes, (
+        f"往返用例缺城市组合维度：只有 {sorted(scopes)}，"
+        "至少要有同城两站 / 跨城 / 跨省长途各一条"
+    )
+    assert "weekday" in anchors, "缺少按星期几锚定的用例（周末往返这条维度会退化）"
+    assert len({c.prefer_window for c in cases}) >= 2, (
+        "prefer_window 至少要有两种取值，否则时段维度等于没覆盖"
+    )

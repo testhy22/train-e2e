@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlencode
 
 from playwright.sync_api import Locator, Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -104,6 +105,31 @@ class TrainSearchPage(BasePage):
     DATE_IN_URL_RE = re.compile(r"[?&]dDate=(\d{4}-\d{2}-\d{2})")
     # 中转/换乘卡片：一个行程由两段拼成，结构上没有「单一车次号」
     TRANSFER_MARKERS = ("换乘",)
+
+    # ---------------------------------------------------------------- 往返（2026-11-02 探测）
+    #
+    # 来源：tools/probes/probe_round_trip.py / probe_round_trip2.py 两次有头探测，
+    # 结果在 reports/probe/round_trip*_20261102-*.json。三条结论直接决定下面怎么写：
+    #   1. 往返结果页 `div.return-box` 里挂**两栏** `div.return-list`，0=去程 1=返程；
+    #      两栏各自带车型筛选（div.item）与 5 天日期条（ul.date-list）。
+    #   2. `.list-item` 在往返页**被复用**：112 个是车次卡（.card-white.list-item），
+    #      另有 2 个「精确搜索」卡带 .station-filter-bd。直接数 .list-item 会把车次数虚报 +2，
+    #      并把「抽不到车次号」的垃圾条目塞进覆盖率分母 —— 必须显式排除。
+    #   3. URL 参数口径来自用户截图里的真实地址：ticketType=1 是往返（0=单程），
+    #      配 dStation/aStation/dDate/rDate。所以往返走**URL 直达**，不点首页的「往返」+ 第二个日历
+    #      —— 返程日历至今没有实机探测记录，硬写定位器就是猜。
+    ROUND_TRIP_PATH = "/webapp/train/list"
+    RT_TICKET_TYPE_ROUND = "1"
+    RT_COLUMN = "div.return-box div.return-list"
+    RT_TRAIN_CARD = ".card-white.list-item:not(.station-filter-bd)"
+    RT_EXPECTED_COLUMNS = 2
+    LEG_DEPART, LEG_RETURN = 0, 1
+    RETURN_DATE_IN_URL_RE = re.compile(r"[?&]rDate=(\d{4}-\d{2}-\d{2})")
+    # 卡片里的出发时刻。**不用 `^` 锚定**：2026-11-02 实测，抢票卡片的文本以
+    # 「成功率：较高」开头（`成功率：较高 20:21 汉口 0时18分 D105 …`），
+    # 锚定行首会让这类卡片统统取不到时刻，时段统计凭空少一截。
+    # 卡片里第一个 HH:MM 就是出发时刻（到达时刻在其后），用 search 取第一个最稳。
+    DEPART_CLOCK_RE = re.compile(r"(\d{1,2}:\d{2})")
 
     def __init__(self, page: Page, base_url: str | None = None) -> None:
         super().__init__(page, base_url)
@@ -466,3 +492,95 @@ class TrainSearchPage(BasePage):
         """拆成 (月份标题, 日号)。月份标题必须带空格 —— DOM 里就是「2026年 11月」。"""
         year, month, day = depart_date.split("-")
         return f"{year}年 {int(month)}月", str(int(day))
+
+    # ---------------------------------------------------------------- 往返：打开与取状态
+
+    def open_round_trip(
+        self, from_city: str, to_city: str, depart_date: str, return_date: str
+    ) -> None:
+        """用 URL 直达往返结果页，不经过首页表单。
+
+        为什么不点首页的「往返」单选 + 两个日历：
+          · 首页往返切换后会出现**第二个日历**（返程），它的控件结构至今没有探测记录，
+            照单程日历的写法硬套等于猜（K-11 那类"点 A 填成 B"就是这么来的）；
+          · 结果页的 URL 参数是可读、可断言、可复现的（`?ticketType=1&dStation=…&rDate=…`），
+            比"点三个控件然后祈祷状态对了"稳定一个数量级。
+        代价：这条路径**不覆盖首页表单**的交互 —— 表单那边由单程冒烟
+        （`test_train_search.py`）守着，两条轨道各管一段，不互相冒充。
+
+        参数口径：`ticketType=1` 为往返（`0` 为单程，见 tools/probes/probe2.py 的既有探测）。
+        """
+        query = urlencode(
+            {
+                "ticketType": self.RT_TICKET_TYPE_ROUND,
+                "dStation": from_city,
+                "aStation": to_city,
+                "dDate": depart_date,
+                "rDate": return_date,
+            },
+            safe="",
+        )
+        logger_info(f"[火车票] 往返直达 {from_city}→{to_city} {depart_date}~{return_date}")
+        # 复用 BasePage.goto：它负责 wait_ready + 关营销浮层 + 拟人节奏里那一拍。
+        self.goto(f"{self.ROUND_TRIP_PATH}?{query}")
+        self.assert_not_blocked()
+
+    def leg_columns(self) -> int:
+        """结果页渲染出几栏（去程/返程）。正常是 2；1 或 0 由用例断言去红，这里只报数。"""
+        return self.page.locator(self.RT_COLUMN).count()
+
+    def leg_scope(self, leg: int) -> str:
+        """某栏头部那段文本，形如「去程 汉口-深圳 11-05 周四 …」。
+
+        取前 40 字就够：要的是「这栏是哪一段行程」，不是整栏 56 条卡片。
+        整栏 inner_text 会把 56 条卡片全读回来（单程那次的 538 条教训）。
+        """
+        column = self.page.locator(self.RT_COLUMN).nth(leg)
+        try:
+            expect(column).to_be_visible(timeout=settings.EXPECT_TIMEOUT_MS)
+        except AssertionError:
+            return ""
+        return column.evaluate(
+            "el => (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40)"
+        )
+
+    def leg_texts(self, leg: int) -> list[str]:
+        """某栏的车次卡文本，**一次**取回。返回空列表表示这栏没有卡。
+
+        排除 `.station-filter-bd`（「精确搜索」卡）的理由写在定位器区那段注释里：
+        它带 `.list-item` 却不是车次，会让条数虚高、覆盖率分母被污染。
+
+        等待窗用 NAV_TIMEOUT_MS（与单程 `result_texts` 同口径）：实测往返页
+        首屏 2~4s 出列表，连跑时会慢；放宽的只是等待，判定门槛没动。
+        """
+        cards = self.page.locator(self.RT_COLUMN).nth(leg).locator(self.RT_TRAIN_CARD)
+        try:
+            expect(cards.first).to_be_visible(timeout=settings.NAV_TIMEOUT_MS)
+        except AssertionError:
+            return []
+        return cards.evaluate_all("els => els.map(el => el.innerText || '')")
+
+    def url_return_date(self) -> str | None:
+        """结果页 URL 里的 rDate —— 用它验证「返程日真的生效了」。"""
+        match = self.RETURN_DATE_IN_URL_RE.search(self.page.url)
+        return match.group(1) if match else None
+
+    @classmethod
+    def depart_clock_of(cls, text: str) -> str | None:
+        """从卡片文本里取出发时刻（HH:MM）；取不到返回 None。
+
+        时段维度只做**软统计**（见 round_trip_cases.yaml 的 prefer_window 注释）：
+        页面确实有「6点 - 12点」这类芯片，但它的归属容器没探明
+        （probe_round_trip3.py 里两次点击都超时），所以不点它、只读结果做分布统计。
+        """
+        match = cls.DEPART_CLOCK_RE.search(text or "")
+        return match.group(1) if match else None
+
+    @staticmethod
+    def in_window(clock: str, start_hour: int, end_hour: int) -> bool:
+        """HH:MM 是否落在 [start_hour, end_hour) 内。纯字符串→整数，不碰 DOM。"""
+        try:
+            hour = int(clock.split(":")[0])
+        except (ValueError, AttributeError):
+            return False
+        return start_hour <= hour < end_hour

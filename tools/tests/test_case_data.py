@@ -17,11 +17,12 @@ from datetime import date, timedelta
 
 import pytest
 
-from utils import case_data, case_schema, hotel_data
+from utils import case_data, case_schema, hotel_data, round_trip_data
 from utils.case_data import (
     case_ids,
     describe,
     load_hotel_search_cases,
+    load_round_trip_cases,
     load_train_smoke_cases,
 )
 
@@ -122,7 +123,9 @@ def test_describe_reports_version_and_counts():
     text = describe()
     assert "suite=hotels" in text, f"酒店数据的 suite 头不对：{text}"
     assert "suite=trains" in text, f"火车票数据的 suite 头不对：{text}"
-    assert text.count("version=1") == 2, f"两份数据都应是 version=1：{text}"
+    assert "suite=trains_round_trip" in text, f"往返数据的 suite 头不对：{text}"
+    # 三份数据文件都应是 version=1（2026-11-02 加往返，从 2 变 3）
+    assert text.count("version=1") == 3, f"三份数据都应是 version=1：{text}"
     assert "cases=0" not in text, f"有空的数据文件：{text}"
 
 
@@ -160,3 +163,89 @@ def test_case_ids_are_ascii_and_unique():
     )
     assert all(i.isascii() for i in ids), f"出现非 ASCII 参数化 id：{[i for i in ids if not i.isascii()]}"
     assert len(ids) == len(set(ids)), f"两条轨道的参数化 id 撞了：{ids}"
+
+
+# ---------------------------------------------------------------- 火车票往返（2026-11-02）
+#
+# 往返数据比单程多一个 nights 与"周末锚点"。锚点解析涉及"下一个星期几 + 预售期边界"，
+# 这类算术不测就会在某个特定日期悄悄错位 —— 而且错位方式是"跑了一条日期不对的用例"，
+# 不会红。所以这里用固定基准日把边界全钉死。
+
+
+def test_round_trip_cases_are_valid():
+    cases = load_round_trip_cases(today=TODAY)
+    case_schema.validate_round_trip_cases(cases, today=TODAY)
+
+
+def test_round_trip_param_ids_are_ascii_and_unique():
+    cases = load_round_trip_cases(today=TODAY)
+    ids = case_ids(cases)
+    assert all(i.isascii() for i in ids), f"往返参数化 id 含非 ASCII：{ids}"
+    assert len(ids) == len(set(ids)), f"往返参数化 id 重复：{ids}"
+
+
+@pytest.mark.parametrize(
+    "base, weekday, want_date, want_offset",
+    [
+        # 2026-11-02 是周一。+3 天 = 11-05 周四，下一个周五 = 11-06，T+4。
+        (date(2026, 11, 2), 4, "2026-11-06", 4),
+        # 同一天锚周三：+3 = 周四，下一个周三 = 11-11，T+9。
+        (date(2026, 11, 2), 2, "2026-11-11", 9),
+        # 锚周一：+3 = 周四，下一个周一 = 11-09，T+7。
+        (date(2026, 11, 2), 0, "2026-11-09", 7),
+        # 2026-11-05 是周四，锚周五 = 次日 11-06（T+1）但低于下限 ⇒ 顺延到 11-13（T+8）。
+        (date(2026, 11, 5), 4, "2026-11-13", 8),
+        # 预售期边界：2026-11-02 锚周日 6：+3=11-05 周四，下一个周日 = 11-08（T+6），不越界。
+        (date(2026, 11, 2), 6, "2026-11-08", 6),
+        # 越界回退：2026-11-12 是周四，+3 = 11-15 周日，锚周六 ⇒ 11-21（T+9）。仍在内。
+        (date(2026, 11, 12), 5, "2026-11-21", 9),
+    ],
+)
+def test_round_trip_weekday_anchor(base, weekday, want_date, want_offset):
+    got_date, got_offset = round_trip_data.resolve_weekday(weekday, base)
+    assert (got_date, got_offset) == (want_date, want_offset), (
+        f"基准日 {base} 锚 weekday={weekday}：得到 {got_date}(T+{got_offset})，"
+        f"期望 {want_date}(T+{want_offset})"
+    )
+    offset = (date.fromisoformat(got_date) - base).days
+    assert offset == got_offset, "返回的偏移量与日期不自洽"
+    assert round_trip_data.MIN_OFFSET_DAYS <= offset <= round_trip_data.MAX_OFFSET_DAYS, (
+        f"锚点解析越界：T+{offset}"
+    )
+
+
+def test_round_trip_weekday_anchor_rolls_back_within_presale():
+    """越界必须**往前退一周**（仍是同一个星期几），不能抛错也不能夹到预售期末。"""
+    # 2026-11-09 是周一。+3 = 11-12 周四，锚周五 = 11-13（T+4），远未越界；
+    # 换成锚周二：11-12 周四 → 下一个周二 11-17（T+8）。要造越界得从"极限"那一天试：
+    # 2026-11-10（周二）+3 = 11-13 周五，锚周四 ⇒ 11-19（T+9）。
+    date_a, offset_a = round_trip_data.resolve_weekday(3, date(2026, 11, 10))
+    assert date_a == "2026-11-19" and offset_a == 9
+    # 该日期必须仍是周四（0=周一 … 3=周四）
+    assert date.fromisoformat(date_a).weekday() == 3
+
+
+def test_round_trip_requires_exactly_one_anchor():
+    """offset 与 weekday 必须二选一：两个都给、都不给都要报错，不能默认取一个。"""
+    base = {"id": "rt-x", "from_city": "上海", "to_city": "北京", "nights": 1}
+    with pytest.raises(round_trip_data.DataError, match="二选一"):
+        round_trip_data.parse_case({**base, "depart_offset_days": 5, "depart_weekday": 4}, TODAY)
+    with pytest.raises(round_trip_data.DataError, match="二选一"):
+        round_trip_data.parse_case(base, TODAY)
+
+
+def test_round_trip_rejects_bad_train_type_and_scope():
+    base = {
+        "id": "rt-x", "from_city": "上海", "to_city": "北京",
+        "nights": 1, "depart_offset_days": 5,
+    }
+    with pytest.raises(round_trip_data.DataError, match="合法字头"):
+        round_trip_data.parse_case({**base, "train_types": ["G", "X"]}, TODAY)
+    with pytest.raises(round_trip_data.DataError, match="city_scope"):
+        round_trip_data.parse_case({**base, "city_scope": "nearby"}, TODAY)
+
+
+def test_round_trip_rejects_out_of_presale_offset():
+    base = {"id": "rt-x", "from_city": "上海", "to_city": "北京", "nights": 1}
+    with pytest.raises(round_trip_data.DataError, match="预售期"):
+        round_trip_data.parse_case({**base, "depart_offset_days": 20}, TODAY)

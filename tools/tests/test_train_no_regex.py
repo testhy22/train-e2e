@@ -99,3 +99,74 @@ def test_fake_item_matches_real_text_source() -> None:
     """假 item 的 inner_text 与 evaluate_all 取到的字符串是同一口径，避免自欺。"""
     item = _FakeItem("换乘 16 分 北京南转")
     assert TrainSearchPage.is_transfer_text(item.inner_text()) is True
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        # 普通卡片：行首就是出发时刻
+        ("09:49\n汉口\n5时48分\nG1030\n15:37\n深圳北", "09:49"),
+        # 抢票卡片：文本以「成功率：较高」开头（2026-11-02 实测形态），
+        # 锚定行首的旧写法会在这类卡片上返回 None，把时段统计凭空少算一截。
+        ("成功率：较高\n20:21\n汉口\n0时18分\nD105\n20:39\n武昌", "20:21"),
+        # 完全没有时刻的文本
+        ("精确搜索 汉口", None),
+    ],
+)
+def test_depart_clock_of(text: str, expected: str | None) -> None:
+    assert TrainSearchPage.depart_clock_of(text) == expected
+
+
+@pytest.mark.parametrize(
+    "clock, start, end, expected",
+    [
+        ("06:00", 6, 12, True),      # 左闭
+        ("11:59", 6, 12, True),
+        ("12:00", 6, 12, False),     # 右开
+        ("05:59", 6, 12, False),
+        ("23:59", 18, 24, True),
+        ("00:30", 18, 24, False),    # 跨零点不归 night，归 early
+        ("00:30", 0, 6, True),
+    ],
+)
+def test_in_window(clock: str, start: int, end: int, expected: bool) -> None:
+    assert TrainSearchPage.in_window(clock, start, end) is expected
+
+
+# ---------------------------------------------------------------- 实测形态回归（2026-11-02 往返探测）
+#
+# 下面三条文本是**逐字从页面取回**的（reports/probe/round_trip_verify_20261102-221225.json 同批探测），
+# 不是编的样例。锁它们的理由：
+#   · 抢票卡以「成功率：较高」开头，且末尾是「暂无余票，建议抢票，成功率较高」——
+#     这种文本里既有数字也有中文，最容易出现"抽不到"或"抽错"；
+#   · Y 字头是这次新加进正则的，必须有真实文本兜住。
+
+REAL_CARD_TEXTS = [
+    (
+        "抢票卡（D 字头 + 抢票态）",
+        "成功率：较高\n20:21\n汉口\n0时18分\nD105\n20:39\n武昌\n5\n抢\n暂无余票，建议抢票，成功率较高",
+        "D105",
+    ),
+    (
+        "Y 字头（旅游/临客）",
+        "19:19\n汉口\n0时18分\nY719\n19:37\n武昌\n2\n订\n硬座有票",
+        "Y719",
+    ),
+    (
+        "站名里带空格（「武 昌」）",
+        "10:33\n汉口\n0时24分\nY713\n10:57\n武 昌\n2\n订\n硬座有票",
+        "Y713",
+    ),
+]
+
+
+@pytest.mark.parametrize("label, text, expected", REAL_CARD_TEXTS, ids=[t[0] for t in REAL_CARD_TEXTS])
+def test_real_card_texts_still_parse(label: str, text: str, expected: str) -> None:
+    """真实卡片文本必须稳定抽出车次号 —— 抽不到就等于覆盖率口径崩了。"""
+    assert TrainSearchPage.train_number_of(text) == expected, f"{label}：抽取失败"
+
+
+@pytest.mark.parametrize("label, text, expected", REAL_CARD_TEXTS, ids=[t[0] for t in REAL_CARD_TEXTS])
+def test_real_card_texts_are_not_transfer(label: str, text: str, expected: str) -> None:
+    """"这几张是点到点车次，不能因为文本里出现某个词被误判成中转（那会把它踢出分母）。"""
+    assert TrainSearchPage.is_transfer_text(text) is False, f"{label}：被误判为中转"

@@ -26,13 +26,14 @@ from typing import Any
 import yaml
 
 from config import settings
-from utils import data_loader, flight_data, hotel_data
+from utils import data_loader, flight_data, hotel_data, round_trip_data
 
 DATA_VERSION = 1
 DEFAULT_DATA_DIR = settings.PROJECT_ROOT / "data"
 
 HOTEL_CASES = Path("hotels") / "search_cases.yaml"
 TRAIN_CASES = Path("trains") / "smoke_cases.yaml"
+TRAIN_ROUND_TRIP_CASES = Path("trains") / "round_trip_cases.yaml"
 FLIGHT_CASES = Path("flights") / "search_cases.yaml"
 
 
@@ -91,6 +92,19 @@ def load_flight_cases(
     return flight_data.load_cases(target, today=today)
 
 
+def load_round_trip_cases(
+    path: str | Path | None = None, today: date | None = None
+) -> list[round_trip_data.RoundTripCase]:
+    """火车票**往返**用例。默认 `data/trains/round_trip_cases.yaml`（2026-11-02 新增）。
+
+    与 `load_train_smoke_cases` 分开：往返多出 nights/return_date/train_types，
+    且走 URL 直达结果页而不是首页表单，两条轨道的数据契约不同。
+    """
+    target = _resolve(path, TRAIN_ROUND_TRIP_CASES)
+    _meta(target)
+    return round_trip_data.load_cases(target, today=today)
+
+
 def case_ids(cases: list) -> list[str]:
     """供 `pytest.mark.parametrize(ids=...)` 使用。全部是 ASCII。"""
     return [c.param_id for c in cases]
@@ -100,7 +114,11 @@ def describe(base: str | Path | None = None) -> str:
     """一行数据版本摘要，写进验收报告：suite=hotels marker=hotels cases=3 version=1"""
     root = Path(base) if base else data_dir()
     parts: list[str] = []
-    for relative, fallback_suite in ((HOTEL_CASES, "hotels"), (TRAIN_CASES, "trains")):
+    for relative, fallback_suite in (
+        (HOTEL_CASES, "hotels"),
+        (TRAIN_CASES, "trains"),
+        (TRAIN_ROUND_TRIP_CASES, "trains_round_trip"),
+    ):
         target = root / relative
         if not target.is_file():
             parts.append(f"{fallback_suite}: 缺失")

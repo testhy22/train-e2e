@@ -1,0 +1,192 @@
+# 火车票**往返**用例数据（正例）
+#
+# 与 smoke_cases.yaml 的分工：
+#   smoke_cases.yaml  单程冒烟，走首页表单（选城市 → 日历 → 搜索），验证"表单这条路通不通"
+#   本文件            往返，**URL 直达结果页**（`/webapp/train/list?ticketType=1&…`），
+#                     验证"往返结果页到底渲染出什么"
+# 为什么不走首页表单：往返要多点一次「往返」+ 第二个日历，而返程日历至今没有实机探测记录
+# （`pages/train_search_page.py` 的 CALENDAR 只覆盖出发日）。没探测就写定位器 = 编。
+# 结果页 URL 参数口径不是我猜的：来自 2026-11-02 用户截图里的真实地址
+#   `…/webapp/train/list?ticketType=1&dStation=汉口&aStation=深圳&dDate=2026-11-06&rDate=2026-12-09&trainType=…`
+#
+# 字段
+#   id                     用例标识：小写 ASCII slug（进 junit 不能有中文）
+#   name                   中文名，报告展示用
+#   from_city/to_city      站名，必须能命中站点的联想词（同城两站也写具体站名）
+#   city_scope             分类标签：same_city（同城两站）/ cross_city（跨城）/ long_haul（跨省长途）
+#   depart_offset_days     出发日相对今天的天数，区间 +3..+15（预售期，见 settings.MAX_PRESALE_DAYS）
+#   depart_weekday         **与 depart_offset_days 二选一**。0=周一 … 6=周日。
+#                          用于"周五去、周日回"这类真正的周末往返 —— 写 offset 无法保证落在周五。
+#                          解析规则：取「不早于 +3 天的下一个该星期几」，若越过预售期则往前退一周。
+#   nights                 住几晚 = 返程日 - 出发日。返程日 = 出发日 + nights。
+#   train_types            期望在结果里出现的车次字头（G/D/C/Z/T/K 的子集）。
+#                          **不断言"结果里只有这些"**：车型硬筛要点页面上的 div.item 芯片，
+#                          其归属容器尚未探明（见 tools/probes/probe_round_trip3.py 的两次点击超时），
+#                          所以这里只做"至少出现一种 + 报告里给字头分布"。
+#   prefer_window          出发时段偏好：early(0-6) / morning(6-12) / afternoon(12-18) / night(18-24)。
+#                          **软指标**，只统计该时段占比写进报告，不参与 pass/fail ——
+#                          OTA 不保证某时段必有车，硬断言只会误红。
+#   min_results_each_leg   去程/返程**各自**的车次卡下界。
+#                          只有 汉口→深圳 有实测（2026-11-02：去程 55 / 返程 57），
+#                          其余区间未实测，一律取保守下界，不用"应该有"的数字充数。
+#   expected_keyword       弱条件，只进报告
+#   tags                   `-k` 过滤用
+#   expected               http_status 是硬预期（无头下 432 见 K-05，故只在有头/CI 有意义）
+
+version: 1
+suite: trains_round_trip
+marker: ui
+
+cases:
+  # ---------------------------------------------------------------- 跨城 · 近期 · 高铁
+  - id: rt-gz-cs-near
+    name: 广州-长沙 往返，+3 天近期，只到高铁动车
+    from_city: 广州
+    to_city: 长沙
+    city_scope: cross_city
+    depart_offset_days: 3
+    nights: 1
+    train_types: [G, D]
+    prefer_window: morning
+    min_results_each_leg: 2
+    expected_keyword: 广州
+    tags: [smoke, rt, cross-city, near]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: rt-sh-hz-short
+    name: 上海-杭州 往返，+4 天，短途高频
+    from_city: 上海
+    to_city: 杭州
+    city_scope: cross_city
+    depart_offset_days: 4
+    nights: 1
+    train_types: [G, D, C]
+    prefer_window: afternoon
+    min_results_each_leg: 2
+    expected_keyword: 上海
+    tags: [rt, cross-city, short]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  # ---------------------------------------------------------------- 跨省长途 · 全车型
+  - id: rt-sh-bj-gaotie
+    name: 上海-北京 往返，+7 天，只到高铁动车
+    from_city: 上海
+    to_city: 北京
+    city_scope: long_haul
+    depart_offset_days: 7
+    nights: 2
+    train_types: [G, D]
+    prefer_window: afternoon
+    min_results_each_leg: 3
+    expected_keyword: 上海
+    tags: [rt, long-haul, gaotie]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: rt-bj-sh-alltypes
+    name: 北京-上海 往返，+10 天，含普通列车（Z/T/K）
+    from_city: 北京
+    to_city: 上海
+    city_scope: long_haul
+    depart_offset_days: 10
+    nights: 2
+    train_types: [G, D, Z, T, K]
+    prefer_window: morning
+    min_results_each_leg: 3
+    expected_keyword: 北京
+    tags: [rt, long-haul, all-types]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: rt-bj-gz-night
+    name: 北京-广州 往返，+12 天，夜间出发偏好
+    from_city: 北京
+    to_city: 广州
+    city_scope: long_haul
+    depart_offset_days: 12
+    nights: 3
+    train_types: [G, D, Z, T]
+    prefer_window: night
+    min_results_each_leg: 2
+    expected_keyword: 北京
+    tags: [rt, long-haul, night]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  # ---------------------------------------------------------------- 同城两站（汉口/武昌/武汉）
+  - id: rt-hk-wc-samecity
+    name: 汉口-武昌 往返，同城两站互搜
+    from_city: 汉口
+    to_city: 武昌
+    city_scope: same_city
+    depart_offset_days: 5
+    nights: 1
+    train_types: [G, D, C, K]
+    prefer_window: afternoon
+    # 2026-11-02 实测定向核验（tools/probes/probe_round_trip_verify.py，D+5/D+6）：
+    # 汉口→武昌 去程 6 条 / 返程 3 条。下界取 2（留 1 条余量，不按实测值顶格写）。
+    min_results_each_leg: 2
+    expected_keyword: 汉口
+    tags: [rt, same-city]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: rt-wc-hk-samecity-back
+    name: 武昌-汉口 往返（反向），+8 天
+    from_city: 武昌
+    to_city: 汉口
+    city_scope: same_city
+    depart_offset_days: 8
+    nights: 1
+    train_types: [G, D, C, K]
+    prefer_window: morning
+    # 同向核验（同一次探测）：武昌→汉口 去程 3 条 / 返程 6 条。
+    min_results_each_leg: 2
+    expected_keyword: 武昌
+    tags: [rt, same-city, reverse]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  # ---------------------------------------------------------------- 周末往返（周五去、周日回）
+  - id: rt-hk-sz-weekend
+    name: 汉口-深圳 往返，周五去周日回（周末锚点）
+    from_city: 汉口
+    to_city: 深圳
+    city_scope: cross_city
+    # 不写 offset：写死 +4 天在别的日子落地就不是周五。改由 loader 找"下一个周五"。
+    depart_weekday: 4
+    nights: 2
+    train_types: [G, D]
+    prefer_window: morning
+    # 2026-11-02 探测实测：汉口→深圳 去程 55 条 / 返程 57 条（D+4/D+6 区间）
+    min_results_each_leg: 5
+    expected_keyword: 汉口
+    tags: [rt, weekend, cross-city]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: rt-sz-hk-weekend-back
+    name: 深圳-汉口 往返，周五去周日回（反向）
+    from_city: 深圳
+    to_city: 汉口
+    city_scope: cross_city
+    depart_weekday: 4
+    nights: 2
+    train_types: [G, D]
+    prefer_window: night
+    min_results_each_leg: 3
+    expected_keyword: 深圳
+    tags: [rt, weekend, reverse]
+    expected:
+      http_status: 200
+      title_contains: 火车票
