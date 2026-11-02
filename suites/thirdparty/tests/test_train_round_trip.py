@@ -72,9 +72,19 @@ def _leg_report(train: TrainSearchPage, leg: int, texts: list[str]) -> tuple[str
 
 
 @pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
-def test_train_round_trip(case, page, blocked_guard, request):
-    """往返正例：URL 直达 → 两栏结构 → 每栏内容 → 软指标进报告。"""
-    train = TrainSearchPage(page)
+def test_train_round_trip(case, shared_page, blocked_guard, request):
+    """往返正例：URL 直达 → 两栏结构 → 每栏内容 → 软指标进报告。
+
+    **用 `shared_page` 而不是 `page`（2026-11-02 用户要求「在一次登录的情况下测试」）**：
+    `page` 是 function 级，9 条数据 = 9 次冷启动 + 9 次重载 storage_state，等于登录 9 次；
+    `shared_page` 挂在 session 级 context 上，整条轨道只登录一次、只开一个浏览器。
+    page 真崩了由 SharedSession 重建并记 `rebuilds`，context 不动（换 context 就得重新登录）。
+
+    不用 `widget_guard`：它要回退去拉 function 级 `base_page`，一拉就多起一个 context，
+    把「一次登录」直接破掉。往返这条路径走 URL 直达、不点首页表单，没有挂件依赖。
+    阻断判定仍由 `blocked_guard` 负责（它先读 `_base_page`，读到的就是下面这个共享页）。
+    """
+    train = TrainSearchPage(shared_page)
     # 失败/被拦时取证要截**这个**页面对象的现场（conftest 先看 _base_page）。
     request.node._base_page = train
 
