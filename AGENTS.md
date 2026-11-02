@@ -66,3 +66,20 @@
 12. 改动了 `conftest.py` / `pytest.ini` / 依赖版本后，**必须**跑一次
     `pytest tools/tests` + 目标套件，并在回复里给出实测数字（passed 数 + 耗时）。
 13. 报告类改动要给出可核对的三项：统计数字、业务分层是否成型、环境信息是否落盘。
+
+## 六、破坏性工具的测试纪律（2026-11-02 起）
+
+14. **凡会删/改文件的东西（`utils/cleaner.py`、迁移脚本、批处理），验证一律在隔离目录里做**，
+    不得在生产目录上试。本工程的合格示例：`tools/probes/probe_cleaner_bench.py` ——
+    在项目根内自建 `_tmp_cleaner_bench/`，造数据 → 跑 → 删自己造的目录，
+    `reports/` 全程不写。（为什么不能放系统临时目录：`cleaner._guard_target` 要求目标解析后
+    仍在项目根之内，`tempfile.TemporaryDirectory()` 会被直接拒绝 —— 这不是 bug，是防误删红线。）
+
+15. **先 `dry-run` 再真跑**：`E2E_CLEAN_DRY_RUN=1` 只统计不删。另外两个开关的语义别记反：
+    `E2E_CLEAN_HOURS=72` 是**抬高阈值少删**，`E2E_CLEAN_DISABLE=1` 是**整个跳过**并会连带
+    让被测的 4 条 `test_cleaner` 变红（2026-11-02 踩过，负阈值 `-1` 更糟：所有文件都算过期）。
+
+16. **同名覆盖 = 假绿灯**：pytest 不检查同名 `test_` 函数，后者覆盖前者、报告照样全绿。
+    已由 `tools/tests/test_no_duplicate_defs.py` 用 AST 兜住（含判据自证用例）；
+    手工追加测试时也别只看"跑绿了"，要看 passed 数对不对。（2026-11-02 实际发生：追加时重复了两组参数化。）
+
