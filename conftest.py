@@ -587,7 +587,7 @@ def blocked_guard(request: pytest.FixtureRequest):
 
 
 @pytest.fixture
-def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
+def widget_guard(request: pytest.FixtureRequest):
     """自定义控件（日历）没按预期响应时转 **skip**，reason 前缀固定 known-limit:。
 
     与 blocked 的区别（M1-2 改的口径）：blocked 是对方拒绝访问，属于外部事实，
@@ -595,6 +595,13 @@ def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
     永远不该算进 blocked，也不该进分母——否则一条 K-01 会让 ratio 永久虚高。
 
     只捕获 WidgetUnavailable；断言失败仍然是 fail。
+
+    **取证对象改成惰性取（2026-11-02）**，与 blocked_guard 同款改法：
+    原先签名直接依赖 `base_page`，而 `base_page` 依赖 function 级 `page`
+    ⇒ 任何引用本 guard 的用例都会**多起一个浏览器 context**。往返/中转改走
+    共享会话（`shared_page`，一次登录跑完）之后，这一点会当场把「只登录一次」破掉。
+    改成先读 `item._base_page`、没有再回退 `base_page`：对单程那类匿名用例零影响
+    （它们用的 `page` 与 `base_page` 是同一次 fixture 缓存，不会多开页）。
     """
 
     @contextlib.contextmanager
@@ -602,11 +609,14 @@ def widget_guard(request: pytest.FixtureRequest, base_page: BasePage):
         try:
             yield
         except WidgetUnavailable as exc:
-            paths = base_page.capture(request.node.nodeid + "__widget")
+            holder = getattr(request.node, "_base_page", None)
+            if holder is None:
+                holder = request.getfixturevalue("base_page")
+            paths = holder.capture(request.node.nodeid + "__widget")
             request.node.add_report_section(
                 "call",
                 "控件不可用",
-                f"原因：{exc}\nurl：{base_page.page.url}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
+                f"原因：{exc}\nurl：{holder.page.url}\n截图：{', '.join(str(p) for p in paths) or '(截图失败)'}",
             )
             pytest.skip(f"known-limit: K-01 日历控件唤不起（{exc}）")
 

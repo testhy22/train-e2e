@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlencode
 
 from playwright.sync_api import Locator, Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -70,11 +69,26 @@ class TrainSearchPage(BasePage):
 
     # 日期：可见文本是 <strong>2026-10-31</strong>，真实 <input> 带 assist-ib-dom 且**不可见**
     #   ⇒ 直接点 input 必报 "Element is not visible"，必须点外层可见块 div.date。
-    DATE_INPUT = "#label-departDate"
-    DATE_BLOCK = "div.search-date div.date"
+    #
+    # 2026-11-02 补（probe_form_mode2.py 实测，reports/probe/form_mode2_*.json）：
+    #   `div.search-date div.date` 在**任何态**都返回 2 个节点 —— 第 2 个恒为「返回日期取消返程…」，
+    #   单程 / 中转态下它的 visible=false、边界框全 [0,0,0,0]。
+    #   所以取日期块必须按「可见 + 文本前缀（出发/返回）」筛，不能按 index 写死，
+    #   也不能用 .count() 判断「这态有没有返程日期」（永远返回 2，会误判）。
+    DATE_INPUT = {"depart": "#label-departDate", "back": "#label-returnDate"}
+    DATE_BLOCK_ANY = "div.search-date div.date"
+    DATE_BLOCK_WORD = {"depart": "出发", "back": "返回"}
 
     # 日历是自定义 widget + 遮罩层（遮罩不关会拦住后续点击）
-    CALENDAR = ".widget-calendar-depart-wrap"
+    # 两个日历各一个 wrap：出发 `.widget-calendar-depart-wrap`、返程 `.widget-calendar-back-wrap`
+    #   —— 注意是 **back 不是 return**：2026-11-02 实测 `.widget-calendar-return-wrap` 数量为 0，
+    #     按"返回→return"的直觉写必然找不到，然后误报成"返程日历没弹出来"。
+    # 两者内部同构：ul.widget-calendar-hd h3（双月标题）+ ul.date-bd ×2 + li>strong（日号），
+    #   所以下面的翻月/点日逻辑可以按 which 复用，不需要两套实现。
+    CALENDAR = {
+        "depart": ".widget-calendar-depart-wrap",
+        "back": ".widget-calendar-back-wrap",
+    }
     CALENDAR_MASK = ".widget-calendar-mask"
     # 双月视图：标题 ul.widget-calendar-hd > li > h3（文本「2026年 11月」），
     # 日期格 ul.date-bd（两栏顺序与标题一致）> li > strong（日号）
@@ -87,6 +101,25 @@ class TrainSearchPage(BasePage):
     # 它是 overflow 容器，真正的内容画在后代节点上），而 Playwright 的 to_be_visible
     # 要求边界框非空 ⇒ 拿 CALENDAR 当锚点会永远等不到，误报成「日历未唤起」。
     CALENDAR_READY = "ul.widget-calendar-hd"
+
+    # ---------------------------------------------------------------- 首页三态（2026-11-02 探测）
+    #
+    # 来源：tools/probes/probe_form_mode.py / probe_form_mode2.py 两次有头探测，
+    # 产物 reports/probe/form_mode{,_2}_20261102-*.json。三条结论：
+    #   1. 「单程 / 往返 / 中转」**不是 radio，是 ul.search-select > li > button**；
+    #      选中态只落在 `li.cur` 上（aria-checked 与 input[checked] 实测都是 None）。
+    #      ⇒ 判"当前在哪一态"只能读 li.cur，用 get_by_role("radio") 永远拿不到。
+    #   2. 三态的 <input> 集合**完全相同**：label-departStation / label-arriveStation /
+    #      label-departDate / label-returnDate / label-transitStation 恒在 DOM，靠显隐切换。
+    #      这正是"返程日历当年没探过"的真相 —— 它一直存在，只是单程态不可见。
+    #   3. 点按钮再搜索，结果页 URL 与 URL 直达**逐参数等价**：
+    #        往返 ticketType=1&dStation=…&aStation=…&dDate=…&rDate=…
+    #        中转 ticketType=2&…&rDate=（空串）
+    #      ⇒ 改走 UI 不改变被测对象，只是把"表单这条路通不通"也纳入覆盖。
+    MODE_SELECT = "ul.search-select"
+    MODE_NAMES = {"oneway": "单程", "round": "往返", "transfer": "中转"}
+    # 中转态表单多出的一块（2026-11-02 实测可留空直接搜，本轨道不填 —— 见 search_transfer）
+    TRANSIT_CITY = "#label-transitStation"
 
     # 结果页
     RESULT_ITEM = ".list-item"
@@ -105,6 +138,8 @@ class TrainSearchPage(BasePage):
     TRAIN_NO_RE = re.compile(r"^(?:[GDCZTKYS]\d{1,4}|\d{4})$")
     RESULT_COUNT_RE = re.compile(r"共\s*(\d+)\s*车次")
     DATE_IN_URL_RE = re.compile(r"[?&]dDate=(\d{4}-\d{2}-\d{2})")
+    # 结果页的行程类型：0=单程、1=往返、2=中转（三次实测）。断言"点对了子菜单按钮"用它。
+    TICKET_TYPE_IN_URL_RE = re.compile(r"[?&]ticketType=(\d+)")
     # 中转/换乘卡片：一个行程由两段拼成，结构上没有「单一车次号」
     TRANSFER_MARKERS = ("换乘",)
 
@@ -117,10 +152,9 @@ class TrainSearchPage(BasePage):
     #   2. `.list-item` 在往返页**被复用**：112 个是车次卡（.card-white.list-item），
     #      另有 2 个「精确搜索」卡带 .station-filter-bd。直接数 .list-item 会把车次数虚报 +2，
     #      并把「抽不到车次号」的垃圾条目塞进覆盖率分母 —— 必须显式排除。
-    #   3. URL 参数口径来自用户截图里的真实地址：ticketType=1 是往返（0=单程），
-    #      配 dStation/aStation/dDate/rDate。所以往返走**URL 直达**，不点首页的「往返」+ 第二个日历
-    #      —— 返程日历至今没有实机探测记录，硬写定位器就是猜。
-    ROUND_TRIP_PATH = "/webapp/train/list"
+    #   3. URL 参数口径来自实测：ticketType=1 是往返（0=单程），配 dStation/aStation/dDate/rDate。
+    #      **2026-11-02 起这个常量只用于断言**（校验点「往返」确实把页面带进了往返结果页），
+    #      不再用于 goto —— 用户裁决往返必须靠点按钮进，见 search_round_trip。
     RT_TICKET_TYPE_ROUND = "1"
     RT_COLUMN = "div.return-box div.return-list"
     RT_TRAIN_CARD = ".card-white.list-item:not(.station-filter-bd)"
@@ -137,9 +171,8 @@ class TrainSearchPage(BasePage):
     #
     # 来源：tools/probes/probe_transfer.py / probe_transfer2.py / probe_transfer3.py
     # 三次有头探测，产物在 reports/probe/transfer_*.json。四条结论直接决定下面怎么写：
-    #   1. **URL 口径**：`ticketType=2` 是中转（`1` 往返、`0` 单程）。来自用户截图 2 的真实地址
-    #      `.../webapp/train/list?ticketType=2&dStation=汉口&aStation=深圳&dDate=2026-11-06…`，
-    #      所以中转同样走 URL 直达，不点首页那个「中转」按钮（它是 button，不是 radio）。
+    #   1. **URL 口径**：`ticketType=2` 是中转（`1` 往返、`0` 单程）。**2026-11-02 起只用于断言**，
+    #      不再用于 goto —— 用户裁决中转必须靠点「中转」按钮进，见 search_transfer。
     #   2. `.transfer-box` 是**整块容器**（含 h3 标题 + 全部卡片），它的父才是一层 `section`。
     #      第一轮把它当成单卡，于是 `querySelectorAll("section")` 返回 0 —— 层级读反了。
     #   3. 卡片仍是 `div.card-white.list-item`（汉口→深圳 205 张），**与单程/往返同一个 class**；
@@ -148,7 +181,6 @@ class TrainSearchPage(BasePage):
     #   4. 卡内结构：`.from .time/.station`、`.trans-station`（「深圳北转」）、
     #      `.to .time/.station`、`.rbox .price`、`.rbox .surplus-list li`（「第一程 G3785 二等座有票」）、
     #      `.tag-tzhc`（「同站换乘」标签，非必有）。
-    TRANSFER_PATH = "/webapp/train/list"
     TICKET_TYPE_TRANSFER = "2"
     TRANSFER_BOX = ".transfer-box"
     TRANSFER_HEADING = ".transfer-box h3"
@@ -164,11 +196,121 @@ class TrainSearchPage(BasePage):
         # 最近一次点选时面板里的候选项（纯文本快照），只在失败时进异常消息。
         # 留着它的理由：这类「点 A 填成 B」的问题，没有现场快照就只能靠猜。
         self._pick_trace: list[str] = []
+        # 操作链（2026-11-02 用户要求）：每个真实 UI 动作记一行
+        # [序号] 控件类型 | 定位方式 | 执行动作 | 等待条件 | 结果断言
+        self.actions: list[dict[str, str]] = []
+        # 页面导航次数。本轨道全程只允许 open() 导航一次（子菜单必须点击进入），
+        # 用例断它 == 1 就是"没有任何 URL 直达"的硬证据。
+        self.navigations = 0
+
+    # ---------------------------------------------------------------- 操作链记录
+
+    def goto(self, path: str = "/") -> None:
+        """覆写只为计数：子菜单禁止 URL 直达，用例断言导航次数恒为 1。"""
+        self.navigations += 1
+        super().goto(path)
+
+    def _log(self, kind: str, locate: str, action: str, wait: str, result: str) -> None:
+        self.actions.append(
+            {
+                "kind": kind,
+                "locate": locate,
+                "action": action,
+                "wait": wait,
+                "result": result,
+            }
+        )
+
+    def action_log(self) -> str:
+        """操作链的可读文本（markdown 表格），写进报告也方便贴到交付说明里。"""
+        lines = ["| # | 控件类型 | 定位方式 | 执行动作 | 等待条件 | 结果断言 |", "|---|---|---|---|---|---|"]
+        for i, rec in enumerate(self.actions, 1):
+            lines.append(
+                f"| {i} | {rec['kind']} | {rec['locate']} | {rec['action']} "
+                f"| {rec['wait']} | {rec['result']} |"
+            )
+        lines.append("")
+        lines.append(f"页面导航次数（只允许 `open()` 那一次）：{self.navigations}")
+        return "\n".join(lines)
 
     # ---------------------------------------------------------------- 页面动作
 
     def open(self) -> None:
+        """打开一级菜单。**全程唯一允许的 URL 导航**（用户 2026-11-02 裁决）。"""
         self.open_and_check("/")
+        self._log(
+            "一级菜单",
+            self.base_url + "/",
+            "open（全程唯一一次 URL 导航）",
+            "wait_ready + 风控体检",
+            f"title={self.page.title()[:24]!r}｜navigations={self.navigations}",
+        )
+
+    def select_mode(self, mode: str) -> None:
+        """点首页「单程 / 往返 / 中转」，并确认选中态真的切过去了。
+
+        mode: "oneway" | "round" | "transfer"
+
+        选中态的唯一判据是 `ul.search-select li.cur` —— 实测三态的 aria-checked 与
+        input[checked] 都是 None，用 get_by_role("radio") 拿不到任何东西。
+        点完只等"点击成功"不够：按钮是 button，点下去到表单重排之间有一拍，
+        此时立刻去点城市输入框会点到旧布局上。所以切完还要等该态专属控件就位
+        （见 _wait_mode_ready），这一步同时充当"切换真的生效了"的证据。
+        """
+        name = self.MODE_NAMES[mode]
+        button = self.page.locator(f"{self.MODE_SELECT} button:text-is('{name}')").first
+        expect(button).to_be_visible()
+
+        if self.current_mode() == name:
+            logger_info(f"[火车票] 已在「{name}」态，跳过切换")
+            self._wait_mode_ready(mode)
+            self._log(
+                "按钮（子菜单切换）",
+                f'{self.MODE_SELECT} button:text-is("{name}")',
+                "未点击（已在该态）",
+                f"该态专属控件就位（{mode}）",
+                f"current_mode={self.current_mode()!r}",
+            )
+            return
+
+        self.human.click(button)
+        expect(self.page.locator(f"{self.MODE_SELECT} li.cur button")).to_have_text(
+            name, timeout=settings.EXPECT_TIMEOUT_MS
+        )
+        self._wait_mode_ready(mode)
+        logger_info(f"[火车票] 已切换到「{name}」态")
+        self._log(
+            "按钮（子菜单切换）",
+            f'{self.MODE_SELECT} button:text-is("{name}")',
+            "click",
+            f'li.cur 文本 == "{name}" 且该态专属控件就位（{mode}）',
+            f"current_mode={self.current_mode()!r}",
+        )
+
+    def current_mode(self) -> str:
+        """当前选中的态（「单程」/「往返」/「中转」）；读不到返回空串。"""
+        cur = self.page.locator(f"{self.MODE_SELECT} li.cur button").first
+        if not cur.count():
+            return ""
+        return (cur.inner_text() or "").strip()
+
+    def _wait_mode_ready(self, mode: str) -> None:
+        """等该态专属控件就位：只等"点了"不够，要等"布局换完了"。
+
+        三个态的期望形态都来自 2026-11-02 实测：
+          round    → 可见日期块变 2 个（第 2 个是返回日期）
+          transfer → 「指定中转城市」输入框可见
+          oneway   → 可见日期块只剩 1 个
+        """
+        if mode == "transfer":
+            expect(self.page.locator(self.TRANSIT_CITY)).to_be_visible(
+                timeout=settings.EXPECT_TIMEOUT_MS
+            )
+            return
+        want = 2 if mode == "round" else 1
+        expect(self.page.locator(f"{self.DATE_BLOCK_ANY}:visible")).to_have_count(
+            want, timeout=settings.EXPECT_TIMEOUT_MS
+        )
 
     def search_button(self) -> Locator:
         return self.page.get_by_role("button", name=self.SEARCH_BUTTON_NAME).first
@@ -217,6 +359,13 @@ class TrainSearchPage(BasePage):
             if actual == city:
                 if attempt > 1:
                     logger_info(f"[火车票] {field} 城市第 {attempt} 次点选才生效（面板重排）")
+                self._log(
+                    "输入框 + 自定义下拉（联想面板）",
+                    f"{selector}（面板限定在 {self.CITY_WRAPPER[field]} 内）",
+                    f"click → 逐字输入「{city}」→ click 联想项「{city}」",
+                    "ul.widget-search-bd 里出现内层文本 == 城市的项",
+                    f"input_value={actual!r}（第 {attempt} 轮点选）",
+                )
                 return
             last = actual
             logger_info(
@@ -304,7 +453,16 @@ class TrainSearchPage(BasePage):
             text = _norm(label.inner_text())
             self._pick_trace.append(f"[{i}]{text}")
             if text == want:
-                self.human.click(items.nth(i))
+                try:
+                    self.human.click(items.nth(i))
+                except PlaywrightTimeout:
+                    # 点下去的那一瞬间面板被重建（K-11 的变体，2026-11-02 实测于
+                    # 武昌→汉口 同城区间）：Playwright 的 click 会一直等这个 li，
+                    # 15s 后抛 TimeoutError。把它算作「这一轮没点上」交给外层 3 轮重试，
+                    # 不让一次瞬时重排直接变成用例失败。
+                    self._pick_trace.append(f"[{i}]{text}(点击瞬间消失)")
+                    logger_info(f"[火车票] 点「{city}」时面板项消失，本轮作废重来")
+                    return False
                 return True
         return False
 
@@ -326,67 +484,102 @@ class TrainSearchPage(BasePage):
 
     # ---------------------------------------------------------------- 日期
 
-    def select_date(self, depart_date: str) -> None:
-        """在日历控件里点选出发日期。depart_date 形如 2026-11-07。
+    def select_date(self, target_date: str, which: str = "depart") -> None:
+        """在日历控件里点选日期。target_date 形如 2026-11-07；which = "depart" | "back"。
 
-        2026-11-01 改法：
+        2026-11-01 改法（保留）：
           1. 点外层可见块 div.search-date div.date，不再点 #label-departDate
              —— 那个 input 带 assist-ib-dom，Playwright 判为不可见，force 也点不动。
-          2. 不再尝试 get_by_text(depart_date) 兜底：日历没打开时该文本不在页面上
+          2. 不做 get_by_text(target_date) 兜底：日历没打开时该文本不在页面上
              （页面只显示当前选中日期），这条兜底只会把错误变成 15s 的 click 超时。
           3. 点不动/日历不出，一律转 WidgetUnavailable（由用例按 K-01 记 blocked），
              不让 Playwright 的 TimeoutError 漏成 failure 并计入分母。
-        """
-        target_month, target_day = self._split_date(depart_date)
-        logger_info(f"[火车票] 选出发日期 {depart_date}")
 
-        block = self.page.locator(self.DATE_BLOCK).first
+        2026-11-02 增（往返返程）：按 which 区分两个日期块与两个日历 wrap。
+          取日期块的方式从 `.first` 改成「可见 + 文本前缀匹配」—— 实测任何态下
+          `div.search-date div.date` 都是 2 个节点，第 2 个（返回日期）在单程/中转态
+          不可见；按 index 取会在换态后偷偷点空，还会把报错指向错误的方向。
+        """
+        target_month, target_day = self._split_date(target_date)
+        word = self.DATE_BLOCK_WORD[which]
+        label = "出发日期" if which == "depart" else "返回日期"
+        logger_info(f"[火车票] 选{label} {target_date}")
+
+        block = self._date_block(which)
         try:
             expect(block).to_be_visible(timeout=settings.EXPECT_TIMEOUT_MS)
             self.human.click(block)
         except (AssertionError, PlaywrightTimeout) as exc:
             raise WidgetUnavailable(
-                f"日期块 {self.DATE_BLOCK} 点不动（可能被城市面板遮罩拦住），"
-                f"无法点选 {depart_date}"
+                f"{label}块（含「{word}」的 div.date）点不动，可能被城市面板或日历遮罩拦住，"
+                f"无法点选 {target_date}"
             ) from exc
 
+        wrap = self.CALENDAR[which]
         try:
-            expect(self.page.locator(f"{self.CALENDAR} {self.CALENDAR_READY}").first).to_be_visible(
+            expect(self.page.locator(f"{wrap} {self.CALENDAR_READY}").first).to_be_visible(
                 timeout=settings.EXPECT_TIMEOUT_MS
             )
         except AssertionError as exc:
             raise WidgetUnavailable(
-                f"日历未唤起（{self.CALENDAR} {self.CALENDAR_READY} 仍不可见），无法点选 {depart_date}"
+                f"{label}的日历未唤起（{wrap} {self.CALENDAR_READY} 仍不可见），"
+                f"无法点选 {target_date}"
             ) from exc
 
-        self._goto_month(target_month)
-        self._click_day(target_month, target_day)
+        self._goto_month(target_month, which)
+        self._click_day(target_month, target_day, which)
 
         # 关掉日历（遮罩不关会拦住搜索按钮）
         self._close_calendar()
 
-        actual = self.page.locator(self.DATE_INPUT).input_value().strip()
-        if actual != depart_date:
-            raise WidgetUnavailable(f"点选后日期为 {actual!r}，期望 {depart_date!r}")
+        actual = self.page.locator(self.DATE_INPUT[which]).input_value().strip()
+        if actual != target_date:
+            raise WidgetUnavailable(f"{label}点选后为 {actual!r}，期望 {target_date!r}")
+        self._log(
+            "日期控件（日历弹层）",
+            f"含「{word}」的 div.date → {wrap} 内 ul.date-bd li>strong",
+            f"click 日期块 → click 日期格「{target_date}」",
+            "ul.widget-calendar-hd 可见后按标题下标取对应日期栏",
+            f"input_value={actual!r}",
+        )
 
-    def _month_heads(self) -> Locator:
-        return self.page.locator(self.CALENDAR).locator(self.CALENDAR_MONTH_HEAD)
+    def _date_block(self, which: str) -> Locator:
+        """按「可见 + 文本前缀」找日期块，找不到抛 WidgetUnavailable。
 
-    def _goto_month(self, month_label: str) -> None:
+        不看 index 的理由见 select_date 的 2026-11-02 段。
+        """
+        want = self.DATE_BLOCK_WORD[which]
+        blocks = self.page.locator(self.DATE_BLOCK_ANY)
+        total = blocks.count()
+        for i in range(total):
+            item = blocks.nth(i)
+            if not item.is_visible():
+                continue
+            if want in (item.inner_text() or ""):
+                return item
+        raise WidgetUnavailable(
+            f"页面上没有可见的「{want}日期」块（div.date 共 {total} 个）；"
+            f"返程日期需要先 select_mode('round')，单程/中转态下它只是隐藏，不是不存在"
+        )
+
+    def _month_heads(self, which: str) -> Locator:
+        return self.page.locator(self.CALENDAR[which]).locator(self.CALENDAR_MONTH_HEAD)
+
+    def _goto_month(self, month_label: str, which: str) -> None:
         """翻到目标月份。widget 是双月视图，目标常在右栏，翻页只在必要时发生。"""
         for _ in range(3):
-            if self._month_visible(month_label):
+            if self._month_visible(month_label, which):
                 return
-            nxt = self.page.locator(self.CALENDAR).get_by_text("›", exact=True).first
+            nxt = self.page.locator(self.CALENDAR[which]).get_by_text("›", exact=True).first
             if not nxt.is_visible():
                 break
             # 翻月可能连点：用 quick 档（单次 150–350ms），避免 3×400ms 的累积机械节奏。
             self.human.click_quick(nxt)
-        if not self._month_visible(month_label):
+        if not self._month_visible(month_label, which):
             raise WidgetUnavailable(f"日历里翻不到 {month_label}")
 
-    def _month_visible(self, month_label: str) -> bool:
-        heads = self._month_heads()
+    def _month_visible(self, month_label: str, which: str) -> bool:
+        heads = self._month_heads(which)
         want = _norm(month_label)
         try:
             for i in range(heads.count()):
@@ -396,14 +589,14 @@ class TrainSearchPage(BasePage):
             return False
         return False
 
-    def _click_day(self, month_label: str, day: str) -> None:
+    def _click_day(self, month_label: str, day: str, which: str) -> None:
         """点具体某一天。
 
         双月视图里两栏各有一套 ul.date-bd，顺序与标题栏一致 —— 按标题下标取对应那栏，
         避免「同一天在两栏都出现时点错月份」（旧的 filter(has_text=...) 做法会漂）。
         """
-        heads = self._month_heads()
-        bodies = self.page.locator(self.CALENDAR).locator(self.CALENDAR_MONTH_BODY)
+        heads = self._month_heads(which)
+        bodies = self.page.locator(self.CALENDAR[which]).locator(self.CALENDAR_MONTH_BODY)
         want_month = _norm(month_label)
 
         index = None
@@ -457,6 +650,13 @@ class TrainSearchPage(BasePage):
         self.page.wait_for_url(re.compile(r"/webapp/train/list"), timeout=settings.NAV_TIMEOUT_MS)
         self.wait_ready()
         self.assert_not_blocked()
+        self._log(
+            "按钮",
+            f'role=button[name="{self.SEARCH_BUTTON_NAME}"]',
+            "click",
+            "URL 跳到 /webapp/train/list 且 load 完成",
+            f"url={self.page.url[:96]}…（ticketType={self.url_ticket_type()}）",
+        )
 
     # ---------------------------------------------------------------- 取状态（不断言）
 
@@ -515,6 +715,16 @@ class TrainSearchPage(BasePage):
         match = self.DATE_IN_URL_RE.search(self.page.url)
         return match.group(1) if match else None
 
+    def url_ticket_type(self) -> str | None:
+        """结果页 URL 里的 ticketType —— 用它验证「点对了子菜单按钮」。
+
+        2026-11-02 起往返/中转都走首页表单，`ticketType` 是"点的那个按钮真的生效"的
+        唯一硬证据：0=单程、1=往返、2=中转（三次实测）。不查它就可能出现
+        「点了往返但页面其实还是单程态」却因结果页有列表而蒙混过关的情况。
+        """
+        match = self.TICKET_TYPE_IN_URL_RE.search(self.page.url)
+        return match.group(1) if match else None
+
     @staticmethod
     def _split_date(depart_date: str) -> tuple[str, str]:
         """拆成 (月份标题, 日号)。月份标题必须带空格 —— DOM 里就是「2026年 11月」。"""
@@ -523,35 +733,31 @@ class TrainSearchPage(BasePage):
 
     # ---------------------------------------------------------------- 往返：打开与取状态
 
-    def open_round_trip(
+    def search_round_trip(
         self, from_city: str, to_city: str, depart_date: str, return_date: str
     ) -> None:
-        """用 URL 直达往返结果页，不经过首页表单。
+        """走首页表单：点「往返」→ 填两地 → 选出发日 → 选返回日 → 点搜索。
 
-        为什么不点首页的「往返」单选 + 两个日历：
-          · 首页往返切换后会出现**第二个日历**（返程），它的控件结构至今没有探测记录，
-            照单程日历的写法硬套等于猜（K-11 那类"点 A 填成 B"就是这么来的）；
-          · 结果页的 URL 参数是可读、可断言、可复现的（`?ticketType=1&dStation=…&rDate=…`），
-            比"点三个控件然后祈祷状态对了"稳定一个数量级。
-        代价：这条路径**不覆盖首页表单**的交互 —— 表单那边由单程冒烟
-        （`test_train_search.py`）守着，两条轨道各管一段，不互相冒充。
+        2026-11-02 用户裁决：往返必须靠**点按钮 + 填输入框**进子菜单，不能改 URL 直达；
+        只有回到一级菜单（trains.ctrip.com 首页）才允许用 URL。
 
-        参数口径：`ticketType=1` 为往返（`0` 为单程，见 tools/probes/probe2.py 的既有探测）。
+        旧版走 URL 直达的理由是「返程日历没有探测记录，硬写就是猜」。该理由现在已经消失：
+        probe_form_mode2.py 探明返程 wrap 是 `.widget-calendar-back-wrap`（back，不是 return），
+        且与出发日历同构 —— 于是把 URL 直达那条路**删掉**，而不是与 UI 路径并存。
+        并存会让两条路各自跑出不同结论（本项目已有「两套口径就是两套真相」的教训）。
+
+        实测（2026-11-02，汉口→深圳 D+4/D+6）：点出来的结果页 URL 为
+        `?ticketType=1&dStation=…&aStation=…&dDate=2026-11-06&rDate=2026-11-08&…`，
+        与旧版 URL 直达**逐参数相同**，结果页 2 栏 / 112 卡。
         """
-        query = urlencode(
-            {
-                "ticketType": self.RT_TICKET_TYPE_ROUND,
-                "dStation": from_city,
-                "aStation": to_city,
-                "dDate": depart_date,
-                "rDate": return_date,
-            },
-            safe="",
-        )
-        logger_info(f"[火车票] 往返直达 {from_city}→{to_city} {depart_date}~{return_date}")
-        # 复用 BasePage.goto：它负责 wait_ready + 关营销浮层 + 拟人节奏里那一拍。
-        self.goto(f"{self.ROUND_TRIP_PATH}?{query}")
-        self.assert_not_blocked()
+        self.select_mode("round")
+        self.select_city("depart", from_city)
+        self.select_city("arrive", to_city)
+        self.select_date(depart_date)
+        # 返程日联动：选完出发日后返回日期块会自动顺延（实测 +2 天），
+        # 但那是页面的猜测，不是用例要的日期 —— 一律显式点一遍。
+        self.select_date(return_date, which="back")
+        self.submit()
 
     def leg_columns(self) -> int:
         """结果页渲染出几栏（去程/返程）。正常是 2；1 或 0 由用例断言去红，这里只报数。"""
@@ -580,13 +786,55 @@ class TrainSearchPage(BasePage):
 
         等待窗用 NAV_TIMEOUT_MS（与单程 `result_texts` 同口径）：实测往返页
         首屏 2~4s 出列表，连跑时会慢；放宽的只是等待，判定门槛没动。
+
+        2026-11-02 补「文本就绪」等待（起因见 _wait_leg_text_ready）：
+        首卡可见 ≠ 整栏文本填好。只等首卡就会拿到一批空壳卡，覆盖率凭空掉一截。
         """
         cards = self.page.locator(self.RT_COLUMN).nth(leg).locator(self.RT_TRAIN_CARD)
         try:
             expect(cards.first).to_be_visible(timeout=settings.NAV_TIMEOUT_MS)
         except AssertionError:
             return []
+        self._wait_leg_text_ready(leg)
         return cards.evaluate_all("els => els.map(el => el.innerText || '')")
+
+    def _wait_leg_text_ready(self, leg: int) -> None:
+        """等某栏的卡片文本真的填进去，超时就用当前快照（由覆盖率断言去红）。
+
+        为什么需要这一步（2026-11-02 实测，`rt-hk-sz-weekend-T+3`）：
+          走首页表单进结果页时，去程 **55 张卡**都在 DOM 里、第一张也可见，
+          但只有 43 张的 innerText 有内容，另 12 张是空壳 ⇒ 覆盖率算成 78% 红掉。
+          同一 URL 直接 goto（等得更久）时 55/55 全有文本，覆盖率 100%。
+          ⇒ 差异不是数据不同，是**取值时机**不同。首卡可见只是个过早的信号。
+
+        判据用「非空文本的卡片占比 ≥ 95%」而不是"车次号覆盖率"：
+        后者要在 JS 里复刻 TRAIN_NO_RE，等于把车次号口径写成两套（本项目明确禁止）。
+        留 5% 余量是给「本来就无文本的占位卡」—— 真要卡住，也该由覆盖率的 90% 门槛去红，
+        不该在这里变成 15s 超时。
+        """
+        try:
+            self.page.wait_for_function(
+                """
+                ({sel, leg}) => {
+                  const cols = document.querySelectorAll(sel);
+                  const col = cols[leg];
+                  if (!col) return false;
+                  const cards = col.querySelectorAll(".card-white.list-item:not(.station-filter-bd)");
+                  if (!cards.length) return false;
+                  let filled = 0;
+                  for (const card of cards) {
+                    if ((card.innerText || "").trim().length > 4) filled++;
+                  }
+                  return filled >= cards.length * 0.95;
+                }
+                """,
+                arg={"sel": self.RT_COLUMN, "leg": leg},
+                timeout=settings.NAV_TIMEOUT_MS,
+                polling=200,  # 显式定时轮询：raf 在挂起的渲染器上等不到下一帧（K-06）
+            )
+        except PlaywrightTimeout:
+            # 不抛：没填满这件事由覆盖率断言给出可读的失败信息，这里只负责"等到不能再等"。
+            logger_info(f"[火车票] 第 {leg} 栏文本未在 {settings.NAV_TIMEOUT_MS}ms 内填满，按当前快照继续")
 
     def url_return_date(self) -> str | None:
         """结果页 URL 里的 rDate —— 用它验证「返程日真的生效了」。"""
@@ -615,30 +863,27 @@ class TrainSearchPage(BasePage):
 
     # ---------------------------------------------------------------- 中转：打开与取数
 
-    def open_transfer(self, from_city: str, to_city: str, depart_date: str) -> None:
-        """URL 直达中转结果页（`ticketType=2`），不点首页那个「中转」按钮。
+    def search_transfer(self, from_city: str, to_city: str, depart_date: str) -> None:
+        """走首页表单：点「中转」→ 填两地 → 选出发日 → 点搜索。
 
-        为什么不点按钮：首页「中转」实测是个 `button`（不是 radio），点它之后还要在
-        同一张表单里填城市、填日期、可选「指定中转城市」—— 每个控件都得单独探，
-        而 URL 参数已经把同样的状态表达清楚了，且可断言（dDate 回读）。
+        2026-11-02 用户裁决：中转与往返一样，必须靠点按钮进子菜单，不能改 URL 直达。
+        旧版走 URL 的理由是「首页那个『中转』是 button 不是 radio，点完还要填 4 个控件」，
+        现在 4 个控件全探完了（probe_form_mode2.py），理由不成立，URL 路径删除。
 
-        代价说清楚：这条路径**不覆盖首页表单**的交互。表单路由由单程冒烟守着，
-        中转只负责「结果页有没有方案、方案是不是两段」。两条轨道各管一段，不互相冒充。
+        「指定中转城市」**留空**：实测该框（`#label-transitStation`，placeholder「中转城市」）
+        不填也能出方案（汉口→深圳 201 张卡，标题「中转方案推荐」），
+        而填它需要把联想面板/候选城市再探一遍 —— 没有实测样本就不写定位器，避免 K-01 那类
+        "填了个看起来对的值、其实没选上"的假通过。留空会在报告里写明，不让它变成隐形假设。
 
-        「指定中转城市」本轨道**不传**（探测的四组数据都没用到它，不凭想象加参数）。
+        实测（2026-11-02，汉口→深圳 D+4）：结果页 URL 为
+        `?ticketType=2&dStation=…&aStation=…&dDate=2026-11-06&rDate=&…`，
+        与旧版 URL 直达逐参数相同（rDate 是空串）。
         """
-        query = urlencode(
-            {
-                "ticketType": self.TICKET_TYPE_TRANSFER,
-                "dStation": from_city,
-                "aStation": to_city,
-                "dDate": depart_date,
-            },
-            safe="",
-        )
-        logger_info(f"[火车票] 中转直达 {from_city}→{to_city} {depart_date}")
-        self.goto(f"{self.TRANSFER_PATH}?{query}")
-        self.assert_not_blocked()
+        self.select_mode("transfer")
+        self.select_city("depart", from_city)
+        self.select_city("arrive", to_city)
+        self.select_date(depart_date)
+        self.submit()
 
     def transfer_heading_text(self) -> str:
         """中转结果页的标题（正常是「中转方案推荐」）。取不到返回空串，由用例断言去红。"""

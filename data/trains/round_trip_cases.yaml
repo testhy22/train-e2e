@@ -1,13 +1,19 @@
 # 火车票**往返**用例数据（正例）
 #
 # 与 smoke_cases.yaml 的分工：
-#   smoke_cases.yaml  单程冒烟，走首页表单（选城市 → 日历 → 搜索），验证"表单这条路通不通"
-#   本文件            往返，**URL 直达结果页**（`/webapp/train/list?ticketType=1&…`），
-#                     验证"往返结果页到底渲染出什么"
-# 为什么不走首页表单：往返要多点一次「往返」+ 第二个日历，而返程日历至今没有实机探测记录
-# （`pages/train_search_page.py` 的 CALENDAR 只覆盖出发日）。没探测就写定位器 = 编。
-# 结果页 URL 参数口径不是我猜的：来自 2026-11-02 用户截图里的真实地址
-#   `…/webapp/train/list?ticketType=1&dStation=汉口&aStation=深圳&dDate=2026-11-06&rDate=2026-12-09&trainType=…`
+#   smoke_cases.yaml  单程，首页表单（选城市 → 日历 → 搜索）
+#   本文件            往返，同样走首页表单，但多两步：点「往返」+ 点第二个日历（返程）
+#                     ⇒ 验证"往返结果页到底渲染出什么"（两栏 / 每栏车次号覆盖率）
+#
+# **入口方式（2026-11-02 用户裁决）**：子菜单必须点按钮进，不许改 URL 直达；
+# 只有一级菜单（trains.ctrip.com 首页）允许用 URL。所以本轨道从"URL 直达结果页"
+# 改成了完整走表单，URL 参数只作断言依据（ticketType=1 / dDate / rDate 回读）。
+# 返程日历的定位依据见 docs/locator-evidence/FORM-MODE.md
+# （wrap 是 .widget-calendar-back-wrap，**back 不是 return**）。
+#
+# **运行条数（2026-11-02 用户裁决）**：每功能默认最多 3 条，只有明确要求全量回归时
+# 才跑全部 ⇒ 本文件 9 条是数据资产，默认运行集由 utils/case_data.QUOTA_PICK 挑 3 条
+# （跨城+3天 / 长距离+12天夜间 / 同城两站+5天），E2E_FULL=1 才跑全 9 条。
 #
 # 字段
 #   id                     用例标识：小写 ASCII slug（进 junit 不能有中文）
