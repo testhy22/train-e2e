@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 
 from config import settings
-from utils import data_loader, flight_data, hotel_data, round_trip_data
+from utils import data_loader, flight_data, hotel_data, round_trip_data, transfer_data
 
 DATA_VERSION = 1
 DEFAULT_DATA_DIR = settings.PROJECT_ROOT / "data"
@@ -34,6 +34,7 @@ DEFAULT_DATA_DIR = settings.PROJECT_ROOT / "data"
 HOTEL_CASES = Path("hotels") / "search_cases.yaml"
 TRAIN_CASES = Path("trains") / "smoke_cases.yaml"
 TRAIN_ROUND_TRIP_CASES = Path("trains") / "round_trip_cases.yaml"
+TRAIN_TRANSFER_CASES = Path("trains") / "transfer_cases.yaml"
 FLIGHT_CASES = Path("flights") / "search_cases.yaml"
 
 
@@ -105,6 +106,19 @@ def load_round_trip_cases(
     return round_trip_data.load_cases(target, today=today)
 
 
+def load_transfer_cases(
+    path: str | Path | None = None, today: date | None = None
+) -> list[transfer_data.TransferCase]:
+    """火车票**中转**用例。默认 `data/trains/transfer_cases.yaml`（2026-11-02 新增）。
+
+    与往返分开：中转的阈值是「方案条数下界 + 两段车次号覆盖率下界」，
+    往返是「每栏条数 + 车次号覆盖率」，字段完全不同，硬合会造出一半恒为 None 的结构。
+    """
+    target = _resolve(path, TRAIN_TRANSFER_CASES)
+    _meta(target)
+    return transfer_data.load_cases(target, today=today)
+
+
 def case_ids(cases: list) -> list[str]:
     """供 `pytest.mark.parametrize(ids=...)` 使用。全部是 ASCII。"""
     return [c.param_id for c in cases]
@@ -118,6 +132,7 @@ def describe(base: str | Path | None = None) -> str:
         (HOTEL_CASES, "hotels"),
         (TRAIN_CASES, "trains"),
         (TRAIN_ROUND_TRIP_CASES, "trains_round_trip"),
+        (TRAIN_TRANSFER_CASES, "trains_transfer"),
     ):
         target = root / relative
         if not target.is_file():

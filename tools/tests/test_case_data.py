@@ -17,12 +17,13 @@ from datetime import date, timedelta
 
 import pytest
 
-from utils import case_data, case_schema, hotel_data, round_trip_data
+from utils import case_data, case_schema, hotel_data, round_trip_data, transfer_data
 from utils.case_data import (
     case_ids,
     describe,
     load_hotel_search_cases,
     load_round_trip_cases,
+    load_transfer_cases,
     load_train_smoke_cases,
 )
 
@@ -124,8 +125,9 @@ def test_describe_reports_version_and_counts():
     assert "suite=hotels" in text, f"酒店数据的 suite 头不对：{text}"
     assert "suite=trains" in text, f"火车票数据的 suite 头不对：{text}"
     assert "suite=trains_round_trip" in text, f"往返数据的 suite 头不对：{text}"
-    # 三份数据文件都应是 version=1（2026-11-02 加往返，从 2 变 3）
-    assert text.count("version=1") == 3, f"三份数据都应是 version=1：{text}"
+    assert "suite=trains_transfer" in text, f"中转数据的 suite 头不对：{text}"
+    # 四份数据文件都应是 version=1（2026-11-02 加往返变 3、再加中转变 4）
+    assert text.count("version=1") == 4, f"四份数据都应是 version=1：{text}"
     assert "cases=0" not in text, f"有空的数据文件：{text}"
 
 
@@ -249,3 +251,63 @@ def test_round_trip_rejects_out_of_presale_offset():
     base = {"id": "rt-x", "from_city": "上海", "to_city": "北京", "nights": 1}
     with pytest.raises(round_trip_data.DataError, match="预售期"):
         round_trip_data.parse_case({**base, "depart_offset_days": 20}, TODAY)
+
+
+# ---------------------------------------------------------------- 中转（2026-11-02）
+
+
+def test_transfer_cases_are_valid():
+    """真实数据文件必须过门禁：字段、预售期、日期自洽、区间多样性。"""
+    cases = load_transfer_cases(today=TODAY)
+    case_schema.validate_transfer_cases(cases, today=TODAY)
+    assert len(cases) >= 3, f"中转用例只有 {len(cases)} 条，少于方案要求的 3 组"
+
+
+def test_transfer_param_ids_are_ascii_and_unique():
+    cases = load_transfer_cases(today=TODAY)
+    ids = case_ids(cases)
+    assert all(i.isascii() for i in ids), f"出现非 ASCII 参数化 id：{[i for i in ids if not i.isascii()]}"
+    assert len(ids) == len(set(ids)), f"中转参数化 id 撞了：{ids}"
+
+
+def test_transfer_dates_follow_today():
+    """日期不能写死：换一天跑，depart_date 必须跟着变。"""
+    cases = load_transfer_cases(today=TODAY)
+    for case in cases:
+        assert case.depart_date == (
+            TODAY + timedelta(days=case.depart_offset_days)
+        ).isoformat(), f"{case.id}: depart_date 与偏移不自洽"
+
+
+def test_transfer_rejects_out_of_presale_offset():
+    base = {"id": "tr-x", "from_city": "汉口", "to_city": "深圳", "min_cards": 1}
+    with pytest.raises(transfer_data.DataError, match="预售期"):
+        transfer_data.parse_cases([{**base, "depart_offset_days": 20}], TODAY)
+    with pytest.raises(transfer_data.DataError, match="预售期"):
+        transfer_data.parse_cases([{**base, "depart_offset_days": 2}], TODAY)
+
+
+def test_transfer_rejects_same_city():
+    with pytest.raises(transfer_data.DataError, match="不能相同"):
+        transfer_data.parse_cases(
+            [{"id": "tr-x", "from_city": "汉口", "to_city": "汉口",
+              "depart_offset_days": 5, "min_cards": 1}],
+            TODAY,
+        )
+
+
+def test_transfer_rejects_bad_thresholds():
+    base = {"id": "tr-x", "from_city": "汉口", "to_city": "深圳", "depart_offset_days": 5}
+    with pytest.raises(transfer_data.DataError, match="min_cards"):
+        transfer_data.parse_cases([{**base, "min_cards": 0}], TODAY)
+    with pytest.raises(transfer_data.DataError, match="min_two_leg_ratio"):
+        transfer_data.parse_cases([{**base, "min_cards": 1, "min_two_leg_ratio": 1.5}], TODAY)
+    with pytest.raises(transfer_data.DataError, match="min_two_leg_ratio"):
+        transfer_data.parse_cases([{**base, "min_cards": 1, "min_two_leg_ratio": 0}], TODAY)
+
+
+def test_transfer_rejects_duplicate_id():
+    row = {"id": "tr-dup", "from_city": "汉口", "to_city": "深圳",
+           "depart_offset_days": 5, "min_cards": 1}
+    with pytest.raises(transfer_data.DataError, match="重复"):
+        transfer_data.parse_cases([row, dict(row)], TODAY)

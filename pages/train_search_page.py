@@ -99,8 +99,10 @@ class TrainSearchPage(BasePage):
     # 纯数字限定 4 位：票价/座数这类 1~3 位数字（如 553）不能被误认成车次号。
     # 2026-11-02 补 Y：汉口↔武昌（同城两站）实测出现 `Y719 / Y713 / Y720` 三趟旅游/临客列车，
     #   旧口径漏认 ⇒ 该栏覆盖率 4/6=67% 直接红。现场文本：`19:19 汉口 0时18分 Y719 19:37 武昌`。
-    #   只加 Y，不顺手加 L/S —— 那两个没有实测记录，遇到再按同样流程补，不凭"应该也有"扩字头。
-    TRAIN_NO_RE = re.compile(r"^(?:[GDCZTKY]\d{1,4}|\d{4})$")
+    # 2026-11-02 补 S：中转方案里实测出现 `S4793 / S4771 / S4907` 等市郊车次，
+    #   文本形如 `第二程 S4793 抢票`（广州→东莞）。不加就整条中转轨道抽不到第二程。
+    # 仍**不加** L / X：至今没有一条实测样本，遇到再按同样流程补（不凭"应该也有"扩字头）。
+    TRAIN_NO_RE = re.compile(r"^(?:[GDCZTKYS]\d{1,4}|\d{4})$")
     RESULT_COUNT_RE = re.compile(r"共\s*(\d+)\s*车次")
     DATE_IN_URL_RE = re.compile(r"[?&]dDate=(\d{4}-\d{2}-\d{2})")
     # 中转/换乘卡片：一个行程由两段拼成，结构上没有「单一车次号」
@@ -130,6 +132,32 @@ class TrainSearchPage(BasePage):
     # 锚定行首会让这类卡片统统取不到时刻，时段统计凭空少一截。
     # 卡片里第一个 HH:MM 就是出发时刻（到达时刻在其后），用 search 取第一个最稳。
     DEPART_CLOCK_RE = re.compile(r"(\d{1,2}:\d{2})")
+
+    # ---------------------------------------------------------------- 中转（2026-11-02 探测）
+    #
+    # 来源：tools/probes/probe_transfer.py / probe_transfer2.py / probe_transfer3.py
+    # 三次有头探测，产物在 reports/probe/transfer_*.json。四条结论直接决定下面怎么写：
+    #   1. **URL 口径**：`ticketType=2` 是中转（`1` 往返、`0` 单程）。来自用户截图 2 的真实地址
+    #      `.../webapp/train/list?ticketType=2&dStation=汉口&aStation=深圳&dDate=2026-11-06…`，
+    #      所以中转同样走 URL 直达，不点首页那个「中转」按钮（它是 button，不是 radio）。
+    #   2. `.transfer-box` 是**整块容器**（含 h3 标题 + 全部卡片），它的父才是一层 `section`。
+    #      第一轮把它当成单卡，于是 `querySelectorAll("section")` 返回 0 —— 层级读反了。
+    #   3. 卡片仍是 `div.card-white.list-item`（汉口→深圳 205 张），**与单程/往返同一个 class**；
+    #      但 `.list-open` 是每张卡可展开的详情面板，数量与卡片一一对应（205=205），
+    #      数它会把方案数正好翻倍。这是本页特有的坑，往返页没有。
+    #   4. 卡内结构：`.from .time/.station`、`.trans-station`（「深圳北转」）、
+    #      `.to .time/.station`、`.rbox .price`、`.rbox .surplus-list li`（「第一程 G3785 二等座有票」）、
+    #      `.tag-tzhc`（「同站换乘」标签，非必有）。
+    TRANSFER_PATH = "/webapp/train/list"
+    TICKET_TYPE_TRANSFER = "2"
+    TRANSFER_BOX = ".transfer-box"
+    TRANSFER_HEADING = ".transfer-box h3"
+    TRANSFER_HEADING_TEXT = "中转方案推荐"
+    # `:not(.list-open)` 是防御：当前 `.list-open` 不带 list-item，但两者数量一一对应，
+    # 万一哪天站点给它加上 list-item，方案数就会翻倍，这里先挡住。
+    TRANSFER_CARD = ".transfer-box .card-white.list-item:not(.list-open)"
+    # 「第一程 G3785」「第二程 D7565」；车次号交给 TRAIN_NO_RE 校验形态，不在这里写死字头。
+    LEG_LABEL_RE = re.compile(r"第([一二])程\s*([A-Za-z]?\d{1,4})")
 
     def __init__(self, page: Page, base_url: str | None = None) -> None:
         super().__init__(page, base_url)
@@ -584,3 +612,92 @@ class TrainSearchPage(BasePage):
         except (ValueError, AttributeError):
             return False
         return start_hour <= hour < end_hour
+
+    # ---------------------------------------------------------------- 中转：打开与取数
+
+    def open_transfer(self, from_city: str, to_city: str, depart_date: str) -> None:
+        """URL 直达中转结果页（`ticketType=2`），不点首页那个「中转」按钮。
+
+        为什么不点按钮：首页「中转」实测是个 `button`（不是 radio），点它之后还要在
+        同一张表单里填城市、填日期、可选「指定中转城市」—— 每个控件都得单独探，
+        而 URL 参数已经把同样的状态表达清楚了，且可断言（dDate 回读）。
+
+        代价说清楚：这条路径**不覆盖首页表单**的交互。表单路由由单程冒烟守着，
+        中转只负责「结果页有没有方案、方案是不是两段」。两条轨道各管一段，不互相冒充。
+
+        「指定中转城市」本轨道**不传**（探测的四组数据都没用到它，不凭想象加参数）。
+        """
+        query = urlencode(
+            {
+                "ticketType": self.TICKET_TYPE_TRANSFER,
+                "dStation": from_city,
+                "aStation": to_city,
+                "dDate": depart_date,
+            },
+            safe="",
+        )
+        logger_info(f"[火车票] 中转直达 {from_city}→{to_city} {depart_date}")
+        self.goto(f"{self.TRANSFER_PATH}?{query}")
+        self.assert_not_blocked()
+
+    def transfer_heading_text(self) -> str:
+        """中转结果页的标题（正常是「中转方案推荐」）。取不到返回空串，由用例断言去红。"""
+        loc = self.page.locator(self.TRANSFER_HEADING).first
+        try:
+            expect(loc).to_be_visible(timeout=settings.EXPECT_TIMEOUT_MS)
+        except AssertionError:
+            return ""
+        return loc.evaluate("el => (el.innerText || '').trim()")
+
+    def transfer_card_count(self) -> int:
+        """中转方案卡条数。`.list-open`（详情面板）不算 —— 见定位器区那段注释。"""
+        return self.page.locator(self.TRANSFER_CARD).count()
+
+    def transfer_cards(self) -> list[dict]:
+        """一次取回全部中转卡的结构化字段；没有卡时返回空列表。
+
+        为什么一次 evaluate_all 而不是逐条 locator：汉口→深圳 实测 205 张卡，
+        逐条取字段会产生 205×9 次协议往返（单程 538 条那次已经吃过这个亏）。
+        """
+        cards = self.page.locator(self.TRANSFER_CARD)
+        try:
+            expect(cards.first).to_be_visible(timeout=settings.NAV_TIMEOUT_MS)
+        except AssertionError:
+            return []
+        return cards.evaluate_all(
+            r"""
+            els => els.map(el => {
+              const norm = (s) => (s == null ? "" : String(s)).replace(/\s+/g, " ").trim();
+              const q = (sel) => { const x = el.querySelector(sel); return x ? norm(x.innerText) : ""; };
+              return {
+                from_time: q(".from .time"),
+                from_station: q(".from .station"),
+                to_time: q(".to .time"),
+                to_station: q(".to .station"),
+                trans_station: q(".trans-station"),
+                trans_text: q(".trans"),
+                price: q(".rbox .price"),
+                legs: Array.from(el.querySelectorAll(".rbox .surplus-list li")).map(li => norm(li.innerText)),
+                same_station_tag: !!el.querySelector(".tag-tzhc"),
+              };
+            })
+            """
+        )
+
+    @classmethod
+    def transfer_leg_numbers(cls, legs: list[str]) -> list[str]:
+        """从「第一程 G3785 二等座有票」这类文本里抽两段车次号（按第一程/第二程顺序）。
+
+        形态仍由 `TRAIN_NO_RE` 校验，不在这里另写一套字头 —— 两套口径就是两套真相。
+        实测存在 `第二程 S4793 抢票`（抢票态）这类文本，它同样是合法车次号；
+        抽不出的（例如「第二程 暂无」）直接跳过，**不补、不猜**。
+        """
+        found: dict[str, str] = {}
+        for item in legs or []:
+            match = cls.LEG_LABEL_RE.search(item)
+            if not match:
+                continue
+            number = match.group(2).upper()
+            if cls.TRAIN_NO_RE.match(number):
+                found.setdefault(match.group(1), number)
+        return [found[key] for key in ("一", "二") if key in found]

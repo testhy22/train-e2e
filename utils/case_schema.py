@@ -167,3 +167,48 @@ def validate_round_trip_cases(cases, today) -> None:
     assert len({c.prefer_window for c in cases}) >= 2, (
         "prefer_window 至少要有两种取值，否则时段维度等于没覆盖"
     )
+
+
+def validate_transfer_cases(cases, today) -> None:
+    """中转用例数据全量校验（data/trains/transfer_cases.yaml）。
+
+    与往返的差别，都是**约束本身不同**、不能照抄：
+      · 中转不返程 ⇒ 没有 nights / return_date 可校验；
+      · 阈值是「方案条数下界 + 两段车次号覆盖率下界」，不是「每栏条数 + 覆盖率」；
+      · **不校验车型字头**：实测中转方案里 G/D/C/K/T/Z/**S**/Y 混在一起
+        （广州→东莞 一次探测就有 S 字头 17 段），写死字头必然误红。
+    """
+    common(cases, "trains_transfer")
+    assert cases, "中转用例至少一条"
+
+    for case in cases:
+        assert case.from_city != case.to_city, f"{case.id}: 出发与到达不能相同"
+        assert case.depart_offset_days >= 3, (
+            f"{case.id}: 出发日偏移必须 >= +3（避免临售紧张导致的空结果），"
+            f"收到 +{case.depart_offset_days}"
+        )
+        # 上限仍守 settings.MAX_PRESALE_DAYS（预售期唯一事实源，这里是 +15）。
+        # ⚠️ 已知偏差：2026-11-02 实测 +18 天（2026-11-20）仍能查出 70 个方案，
+        # 说明站点实际接受期比 15 天长。但改那个常量会影响单程与往返两条既有轨道，
+        # 属基础设施改动，本轨道不擅自放宽 —— 需要时另开一轮统一评估。
+        assert case.depart_offset_days <= 15, (
+            f"{case.id}: 出发日偏移必须 <= +15（预售期，见 settings.MAX_PRESALE_DAYS），"
+            f"收到 +{case.depart_offset_days}"
+        )
+        assert case.min_cards >= 1, f"{case.id}: min_cards 必须 >= 1"
+        assert 0 < case.min_two_leg_ratio <= 1, (
+            f"{case.id}: min_two_leg_ratio 必须在 (0, 1] 内，收到 {case.min_two_leg_ratio}"
+        )
+        assert case.expected.get("http_status") == 200, (
+            f"{case.id}: 期望 http_status 应为 200 —— 无头下的 432 是 K-05 的环境问题，"
+            "不是这条数据该编码的东西"
+        )
+        assert case.depart_date == (
+            today + timedelta(days=case.depart_offset_days)
+        ).isoformat(), f"{case.id}: depart_date 与偏移量不自洽"
+
+    routes = {(c.from_city, c.to_city) for c in cases}
+    assert len(routes) >= 2, (
+        f"中转用例只覆盖了 {len(routes)} 条区间，"
+        "至少要有两条不同区间，否则「数据多样性」这条要求等于没落实"
+    )

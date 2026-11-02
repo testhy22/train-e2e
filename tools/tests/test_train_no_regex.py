@@ -31,6 +31,12 @@ ACCEPT = [
     "Y719",
     "Y713",
     "Y720",
+    # 2026-11-02 新增：中转方案里实测出现 S 字头（市郊列车）。
+    # 现场：广州→东莞 中转卡 `第二程 S4793 抢票`、`第一程 S4771 抢票`、`S4907` 等，
+    # 一次探测里 `S` 字头共 17 段。不加就整条中转轨道抽不到第二程。
+    "S4793",
+    "S4771",
+    "S4907",
 ]
 
 # 页面正文里同样以「一串字符」出现、但**不是**车次号的东西。误认会虚抬覆盖率。
@@ -48,6 +54,11 @@ REJECT = [
     "Y",         # 只有字母没有数字
     "Y12345",    # 5 位数字，超长
     "H6025",     # 未实测的字头（H 是货运线，不该混进客运车次）
+    # 加 S 字头之后的边界
+    "S",         # 只有字母
+    "S12345",    # 6 位数字，超长
+    "L1234",     # 临客字头：至今没有实测样本，**故意不放行**（遇到再按同样流程补）
+    "X1",        # 同上
 ]
 
 
@@ -170,3 +181,47 @@ def test_real_card_texts_still_parse(label: str, text: str, expected: str) -> No
 def test_real_card_texts_are_not_transfer(label: str, text: str, expected: str) -> None:
     """"这几张是点到点车次，不能因为文本里出现某个词被误判成中转（那会把它踢出分母）。"""
     assert TrainSearchPage.is_transfer_text(text) is False, f"{label}：被误判为中转"
+
+
+# ---------------------------------------------------------------- 中转：两段车次号（2026-11-02）
+
+
+@pytest.mark.parametrize(
+    "label, legs, expected",
+    [
+        (
+            "标准两段",
+            ["第一程 G3785 二等座有票", "第二程 D7565 二等座有票"],
+            ["G3785", "D7565"],
+        ),
+        (
+            "S 字头 + 抢票态（广州→东莞实测原文）",
+            ["第一程 S4771 抢票", "第二程 S4793 抢票"],
+            ["S4771", "S4793"],
+        ),
+        (
+            "DOM 顺序反了也按「一/二」归位",
+            ["第二程 D7565 二等座有票", "第一程 G3785 二等座有票"],
+            ["G3785", "D7565"],
+        ),
+        (
+            "第二程没车次号（「暂无」这类），只返回第一程，不补不猜",
+            ["第一程 G1 二等座有票", "第二程 暂无"],
+            ["G1"],
+        ),
+        ("只有一条", ["第一程 C4767 二等座有票"], ["C4767"]),
+        ("非法车次号被拦", ["第一程 ABC 二等座有票", "第二程 D1 二等座有票"], ["D1"]),
+        ("完全没有 legs", [], []),
+    ],
+    ids=[
+        "two-legs",
+        "s-prefix-ticket-grab",
+        "dom-order-reversed",
+        "second-leg-missing",
+        "single-leg",
+        "invalid-number",
+        "empty",
+    ],
+)
+def test_transfer_leg_numbers(label: str, legs: list[str], expected: list[str]) -> None:
+    assert TrainSearchPage.transfer_leg_numbers(legs) == expected, label
