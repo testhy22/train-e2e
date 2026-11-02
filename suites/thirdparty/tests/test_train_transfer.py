@@ -1,12 +1,19 @@
-"""火车票**中转**用例（URL 直达 `ticketType=2`，出发日 D+3..+15）。
+"""火车票**中转**用例（首页点「中转」进入，出发日 D+3..+15）。
+
+流程：首页 → 点「中转」→ 填出发/到达城市 → 点出发日 → 点搜索 → 三层断言。
+「指定中转城市」**留空**：实测不填也能出方案（2026-11-02，汉口→深圳 201 张卡），
+填它需要另探一套联想面板，没有实测样本就不写定位器（避免 K-01 那类假通过）。
+
+2026-11-02 用户裁决：子菜单必须靠**点按钮 + 填输入框**进，不允许改 URL 直达；
+只有回到一级菜单（trains.ctrip.com 首页）才允许用 URL。URL 参数只作**断言依据**。
 
 与另外两条轨道分工：
-  `test_train_search.py`      单程，走首页表单 —— 守"表单这条路通不通"
-  `test_train_round_trip.py`  往返，URL 直达 —— 守"两栏结果页渲染出什么"
-  本文件                        中转，URL 直达 —— 守"方案是不是**真两段拼成**"
+  `test_train_search.py`      单程，走首页表单 —— 守"匿名态表单通不通"
+  `test_train_round_trip.py`  往返，走首页表单（点「往返」+ 两个日历）
+  本文件                        中转，走首页表单（点「中转」）—— 守"方案是不是**真两段拼成**"
 
 断言分三层：
-  结构层：URL 的 dDate 真的生效；`.transfer-box` 存在且标题是「中转方案推荐」；方案条数达标
+  结构层：URL 的 ticketType=2、dDate 真的生效；`.transfer-box` 存在且标题是「中转方案推荐」；条数达标
   内容层：每张方案卡都能抽出**两段**车次号（第一程 + 第二程），占比达标；起终点站名非空
   辅助层：中转站分布、字头分布、同站换乘标签数只写进报告，不参与 pass/fail
          （中转站随余票与开行方案天天变，写死"必须经过深圳北"只会误红）
@@ -30,9 +37,9 @@ from collections import Counter
 import pytest
 
 from pages.train_search_page import TrainSearchPage
-from utils.case_data import case_ids, load_transfer_cases
+from utils.case_data import case_ids, transfer_cases_for_run
 
-CASES = load_transfer_cases()
+CASES = transfer_cases_for_run()
 
 pytestmark = pytest.mark.ui
 
@@ -95,21 +102,46 @@ def _report(train: TrainSearchPage, case, cards: list[dict], heading: str) -> di
 
 
 @pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
-def test_train_transfer(case, shared_page, blocked_guard, request):
-    """中转正例：URL 直达 → 标题/条数 → 每卡两段车次号 → 软指标进报告。"""
+def test_train_transfer(case, shared_page, blocked_guard, widget_guard, request):
+    """中转正例：点「中转」→ 填两地 → 选日期 → 搜索 → 标题/条数 → 每卡两段车次号。"""
     train = TrainSearchPage(shared_page)
     # 失败/被拦时取证要截**这个**页面对象的现场（conftest 先看 _base_page）。
     request.node._base_page = train
 
     with blocked_guard():
-        train.open_transfer(case.from_city, case.to_city, case.depart_date)
+        train.open()
+
+    with blocked_guard(), widget_guard():
+        train.search_transfer(case.from_city, case.to_city, case.depart_date)
 
     with blocked_guard():
         cards = train.transfer_cards()
         heading = train.transfer_heading_text()
         stats = _report(train, case, cards, heading)
 
-        request.node.add_report_section("call", "中转查询信息", stats["text"])
+        # ---------------- 操作链（用户 2026-11-02 要求：可追溯到每一次人类化动作）
+        request.node.add_report_section("call", "操作链", train.action_log())
+
+        # 子菜单零 URL 直达的硬证据：整条用例只允许 open() 导航一次。
+        assert train.navigations == 1, (
+            f"本次用例发生了 {train.navigations} 次页面导航，期望 1 次（只有 open()）"
+            "—— 多出来的那次就是子菜单 URL 直达，违反用户裁决"
+        )
+
+        request.node.add_report_section(
+            "call",
+            "中转查询信息",
+            stats["text"]
+            + f"\nURL 的 ticketType：{train.url_ticket_type()}"
+            + f"\n「指定中转城市」：留空（实测不填可出方案）",
+        )
+
+        # ---------------- 结构层 0：点的确实是「中转」这个子菜单
+        # ticketType 传错/按钮没生效时页面照样有车次列表，只是没有中转方案区。
+        assert train.url_ticket_type() == TrainSearchPage.TICKET_TYPE_TRANSFER, (
+            f"结果页 URL 的 ticketType 是 {train.url_ticket_type()!r}，期望 "
+            f"{TrainSearchPage.TICKET_TYPE_TRANSFER}（2=中转），说明「中转」按钮没真正生效"
+        )
 
         # ---------------- 结构层 1：日期真的生效
         # 不查这一条，"方案非空"可能来自 URL 被改写后的另一天。

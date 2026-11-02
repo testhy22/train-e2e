@@ -1,9 +1,13 @@
-"""火车票**往返**用例（URL 直达结果页，D+3..+15）。
+"""火车票**往返**用例（首页点「往返」进入，D+3..+15）。
 
-与 `test_train_search.py` 的分工写在数据文件头里，一句话：那边守首页表单，这边守往返结果页。
+流程：首页 → 点「往返」→ 填出发/到达城市 → 点出发日 → 点返回日 → 点搜索 → 三层断言。
+
+2026-11-02 用户裁决：子菜单必须靠**点按钮 + 填输入框**进，不允许改 URL 直达；
+只有回到一级菜单（trains.ctrip.com 首页）才允许用 URL。所以本轨道从"URL 直达结果页"
+改成了"完整走首页表单"，URL 参数只作为**断言依据**（ticketType / dDate / rDate 回读）。
 
 断言分三层（口径与单程一致，维度按往返扩展）：
-  结构层：URL 的 dDate/rDate 真的生效；页面渲染出**两栏**；每栏条数达标
+  结构层：URL 的 ticketType=1、dDate/rDate 真的生效；页面渲染出**两栏**；每栏条数达标
   内容层：每栏都能解析出车次号，覆盖率达标；栏头区间与用例方向一致
   辅助层：车型字头分布、时段分布只写进报告，不参与 pass/fail
          （prefer_window 是**软指标** —— OTA 不保证某时段必有车，硬断言只会误红）
@@ -22,10 +26,10 @@ from __future__ import annotations
 import pytest
 
 from pages.train_search_page import TrainSearchPage
-from utils.case_data import case_ids, load_round_trip_cases
+from utils.case_data import case_ids, round_trip_cases_for_run
 from utils.round_trip_data import WINDOW_HOURS
 
-CASES = load_round_trip_cases()
+CASES = round_trip_cases_for_run()
 
 pytestmark = pytest.mark.ui
 
@@ -72,37 +76,57 @@ def _leg_report(train: TrainSearchPage, leg: int, texts: list[str]) -> tuple[str
 
 
 @pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
-def test_train_round_trip(case, shared_page, blocked_guard, request):
-    """往返正例：URL 直达 → 两栏结构 → 每栏内容 → 软指标进报告。
+def test_train_round_trip(case, shared_page, blocked_guard, widget_guard, request):
+    """往返正例：点「往返」→ 填两地 → 两个日历 → 搜索 → 两栏结构 → 每栏内容 → 软指标进报告。
 
     **用 `shared_page` 而不是 `page`（2026-11-02 用户要求「在一次登录的情况下测试」）**：
     `page` 是 function 级，9 条数据 = 9 次冷启动 + 9 次重载 storage_state，等于登录 9 次；
     `shared_page` 挂在 session 级 context 上，整条轨道只登录一次、只开一个浏览器。
     page 真崩了由 SharedSession 重建并记 `rebuilds`，context 不动（换 context 就得重新登录）。
 
-    不用 `widget_guard`：它要回退去拉 function 级 `base_page`，一拉就多起一个 context，
-    把「一次登录」直接破掉。往返这条路径走 URL 直达、不点首页表单，没有挂件依赖。
-    阻断判定仍由 `blocked_guard` 负责（它先读 `_base_page`，读到的就是下面这个共享页）。
+    `widget_guard` 自 2026-11-02 起可用了：它的取证对象改成惰性取 `_base_page`
+    （原先签名硬依赖 `base_page` ⇒ 每引用一次就多起一个 context，直接破掉"一次登录"）。
+    本用例先把 `request.node._base_page` 登记好，guard 拿到的就是这个共享页。
     """
     train = TrainSearchPage(shared_page)
     # 失败/被拦时取证要截**这个**页面对象的现场（conftest 先看 _base_page）。
     request.node._base_page = train
 
     with blocked_guard():
-        train.open_round_trip(
+        train.open()
+
+    with blocked_guard(), widget_guard():
+        train.search_round_trip(
             case.from_city, case.to_city, case.depart_date, case.return_date
         )
 
     with blocked_guard():
+        # ---------------- 操作链（用户 2026-11-02 要求：可追溯到每一次人类化动作）
+        request.node.add_report_section("call", "操作链", train.action_log())
+
+        # 子菜单零 URL 直达的硬证据：整条用例只允许 open() 导航一次。
+        assert train.navigations == 1, (
+            f"本次用例发生了 {train.navigations} 次页面导航，期望 1 次（只有 open()）"
+            "—— 多出来的那次就是子菜单 URL 直达，违反用户裁决"
+        )
+
         request.node.add_report_section(
             "call",
             "往返查询信息",
             f"用例：{case.id}（{case.name}）\n"
             f"区间：{case.from_city}→{case.to_city}（{case.city_scope}）\n"
             f"日期：去 {case.depart_date} ~ 回 {case.return_date}（{case.nights} 晚，锚点={case.anchor}）\n"
-            f"URL 的 dDate：{train.url_depart_date()} / rDate：{train.url_return_date()}\n"
+            f"URL 的 ticketType：{train.url_ticket_type()} / "
+            f"dDate：{train.url_depart_date()} / rDate：{train.url_return_date()}\n"
             f"车型期望：{list(case.train_types)}　时段偏好：{case.prefer_window}（软指标）\n"
             f"关键词「{case.expected_keyword}」是否出现：{case.expected_keyword in train.body_text(timeout=5000)}",
+        )
+
+        # ---------------- 结构层 0：点的确实是「往返」这个子菜单
+        # 不查这一条，"结果页有车次列表"在**单程态**同样成立 —— 会掩盖"按钮没生效"。
+        assert train.url_ticket_type() == TrainSearchPage.RT_TICKET_TYPE_ROUND, (
+            f"结果页 URL 的 ticketType 是 {train.url_ticket_type()!r}，期望 "
+            f"{TrainSearchPage.RT_TICKET_TYPE_ROUND}（1=往返），说明「往返」按钮没真正生效"
         )
 
         # ---------------- 结构层 1：日期真的生效
@@ -112,6 +136,7 @@ def test_train_round_trip(case, shared_page, blocked_guard, request):
         )
         assert train.url_return_date() == case.return_date, (
             f"结果页 URL 的 rDate 是 {train.url_return_date()}，期望 {case.return_date}"
+            "（返程日期有「选完出发日自动顺延」的联动逻辑，不显式点就会带上页面猜的那天）"
         )
 
         # ---------------- 结构层 2：必须渲染成两栏
@@ -120,7 +145,7 @@ def test_train_round_trip(case, shared_page, blocked_guard, request):
         columns = train.leg_columns()
         assert columns == TrainSearchPage.RT_EXPECTED_COLUMNS, (
             f"往返结果页应有 {TrainSearchPage.RT_EXPECTED_COLUMNS} 栏（去程/返程），"
-            f"实际 {columns} 栏；url={page.url}"
+            f"实际 {columns} 栏；url={shared_page.url}"
         )
 
         # ---------------- 结构层 3 + 内容层：逐栏核对方向、条数、车次号
