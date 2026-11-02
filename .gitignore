@@ -34,3 +34,10 @@ chrome_profile/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ---- Node 工具（node-tools/，2026-11-02 新增）----
+# 依赖目录与运行产物；登录态/二维码/持久化 profile 都是凭据本体，绝不入库
+node-tools/node_modules/
+user-data/
+auth-state.json
+qr-code.png

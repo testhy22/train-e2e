@@ -1,0 +1,15 @@
+{
+  "name": "ctrip-node-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "携程 E2E 登录+冒烟（Node 版）：微信快捷登录 / 微信扫码登录 双分支，登录态持久化，酒店/机票/火车票三频道搜索冒烟。",
+  "scripts": {
+    "start": "node ctrip_login_smoke.mjs --choice 2",
+    "quick": "node ctrip_login_smoke.mjs --choice 1",
+    "dry-run": "node ctrip_login_smoke.mjs --dry-run"
+  },
+  "dependencies": {
+    "playwright": "^1.64.1"
+  }
+}
