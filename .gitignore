@@ -4,6 +4,9 @@ reports/
 install.log
 # CI 与本地临时取回的账本副本，真身在 ops/metrics 分支
 .ledger/
+# 用例轮换状态（每个功能上次跑到第几条）：跨运行的记忆，属运行产物的同类，
+# 但它**不能**放 reports/ —— 清理器会按 mtime 删，删了等于每 24h 重置一轮覆盖。
+.e2e-state/
 
 # ---- Python ----
 __pycache__/

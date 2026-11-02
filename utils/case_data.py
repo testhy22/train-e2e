@@ -26,7 +26,14 @@ from typing import Any
 import yaml
 
 from config import settings
-from utils import data_loader, flight_data, hotel_data, round_trip_data, transfer_data
+from utils import (
+    case_rotation,
+    data_loader,
+    flight_data,
+    hotel_data,
+    round_trip_data,
+    transfer_data,
+)
 
 DATA_VERSION = 1
 DEFAULT_DATA_DIR = settings.PROJECT_ROOT / "data"
@@ -99,7 +106,7 @@ def load_round_trip_cases(
     """火车票**往返**用例（**全量**）。默认 `data/trains/round_trip_cases.yaml`。
 
     注意：这是全量 9 条，供数据校验与单测使用。**用例参数化请用
-    `round_trip_cases_for_run()`** —— 它受每功能 3 条的配额约束（用户 2026-11-02 裁决）。
+    `round_trip_cases_for_run()`** —— 它每次只给 1 条（轮换 + 随机，用户 2026-11-03 裁决）。
 
     与 `load_train_smoke_cases` 分开：往返多出 nights/return_date/train_types，
     且入口是首页表单（点「往返」+ 两个日历），两条轨道的数据契约不同。
@@ -122,64 +129,42 @@ def load_transfer_cases(
     return transfer_data.load_cases(target, today=today)
 
 
-# ---------------------------------------------------------------- 每功能用例配额
+# ---------------------------------------------------------------- 每功能本次运行集
 #
-# 用户 2026-11-02 裁决：只做**登录态**测试（匿名轨道不再跑），且**每个功能最多 3 条用例**；
-# 只有在明确说「全量用例回归」时才跑全部。默认 3 条，`E2E_FULL=1` 放开。
+# 用户 2026-11-03 裁决：数据准备多条，**每次随机挑 1 条**跑 —— 省时间，靠多次运行覆盖全量。
+# 挑选策略（轮换 + 随机、为什么不用纯随机、怎么复现）全写在 `utils/case_rotation.py`，
+# 这里只做委派，不重复实现第二套。
 #
 # 为什么在 loader 层裁、而不是 pytest `-k` 过滤：参数化在 import 期就要拿到用例列表，
 # `-k` 是收集之后才过滤 —— "这次到底跑了哪些"只存在于命令行里，报告与门禁都看不见。
 #
-# 为什么保留全量数据文件：数据是资产（9 条覆盖 3 种城市组合 / 6 个车型字头 /
+# 为什么保留全量数据文件：数据是资产（往返 9 条覆盖 3 种城市组合 / 6 个车型字头 /
 # 3..12 天跨度 / 3 个时段），删掉就再也回不来；"跑多少条"是**运行策略**，不是数据本身。
-DEFAULT_CASE_QUOTA = 3
-
-# 默认配额挑哪几条 —— 让四维度全部留在里面，而不是简单取前 3 条：
-#   rt-gz-cs-near      cross_city / +3 天（最短跨度）/ G,D      / morning
-#   rt-bj-gz-night     long_haul  / +12 天（最长跨度）/ G,D,Z,T  / night
-#   rt-hk-wc-samecity  same_city  / +5 天             / G,D,C,K  / afternoon
-# ⇒ city_scope 3/3、字头 G/D/C/Z/T/K 全覆盖、跨度 3..12、时段 3/3。
-# 未进默认配额的 `rt-hk-sz-weekend`（weekday 锚点）只在 `E2E_FULL=1` 时跑。
-QUOTA_PICK = {
-    "round_trip": ("rt-gz-cs-near", "rt-bj-gz-night", "rt-hk-wc-samecity"),
-}
-
-
-def full_run() -> bool:
-    """本次是否为「全量用例回归」。默认 False。"""
-    return os.getenv("E2E_FULL", "").strip() == "1"
 
 
 def take_quota(kind: str, cases: list) -> list:
-    """按配额裁出本次要跑的用例；`E2E_FULL=1` 或总数不超配额时原样返回。"""
-    cases = list(cases)
-    if full_run() or len(cases) <= DEFAULT_CASE_QUOTA:
-        return cases
-    wanted = QUOTA_PICK.get(kind, ())
-    by_id = {getattr(c, "id", None): c for c in cases}
-    picked = [by_id[case_id] for case_id in wanted if case_id in by_id]
-    # 配额点名的用例在数据里找不到（数据被改过）⇒ 退回"取前 3 条"，不让轨道变成 0 条。
-    return picked or cases[:DEFAULT_CASE_QUOTA]
+    """本次运行集：钉 id > 全量 > 轮换 + 随机。开关与算法见 `utils/case_rotation.py`。"""
+    return case_rotation.pick(kind, cases)
 
 
 def round_trip_cases_for_run(
     path: str | Path | None = None, today: date | None = None
 ) -> list[round_trip_data.RoundTripCase]:
-    """往返的**本次运行集**：默认 3 条（配额挑过的），`E2E_FULL=1` 时全量 9 条。"""
+    """往返的**本次运行集**：默认 1 条（轮换挑的），`E2E_CASE_QUOTA=3` 或 `E2E_FULL=1` 放开。"""
     return take_quota("round_trip", load_round_trip_cases(path, today))
 
 
 def transfer_cases_for_run(
     path: str | Path | None = None, today: date | None = None
 ) -> list[transfer_data.TransferCase]:
-    """中转的**本次运行集**：当前 3 条，不超配额，等价于全量。"""
+    """中转的**本次运行集**：默认 1 条（数据共 3 条，跑 3 次覆盖一轮）。"""
     return take_quota("transfer", load_transfer_cases(path, today))
 
 
 def train_smoke_cases_for_run(
     path: str | Path | None = None, today: date | None = None
 ) -> list[data_loader.Case]:
-    """单程的**本次运行集**：当前 3 条，不超配额，等价于全量。"""
+    """单程的**本次运行集**：默认 1 条（数据共 3 条，跑 3 次覆盖一轮）。"""
     return take_quota("train_smoke", load_train_smoke_cases(path, today))
 
 

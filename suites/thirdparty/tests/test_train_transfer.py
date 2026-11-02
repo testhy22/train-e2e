@@ -7,8 +7,11 @@
 2026-11-02 用户裁决：子菜单必须靠**点按钮 + 填输入框**进，不允许改 URL 直达；
 只有回到一级菜单（trains.ctrip.com 首页）才允许用 URL。URL 参数只作**断言依据**。
 
+2026-11-03 用户裁决：数据多条，**每次随机挑 1 条**跑（`utils/case_rotation.py`）。
+本轨道数据共 3 条 ⇒ 连跑 3 次覆盖一轮；全量 `E2E_FULL=1`，复现某条 `E2E_CASE_ID=tr-…`。
+
 与另外两条轨道分工：
-  `test_train_search.py`      单程，走首页表单 —— 守"匿名态表单通不通"
+  `test_train_search.py`      单程，走首页表单 —— 守"登录态表单通不通"
   `test_train_round_trip.py`  往返，走首页表单（点「往返」+ 两个日历）
   本文件                        中转，走首页表单（点「中转」）—— 守"方案是不是**真两段拼成**"
 
@@ -38,6 +41,7 @@ import pytest
 
 from pages.train_search_page import TrainSearchPage
 from utils.case_data import case_ids, transfer_cases_for_run
+from utils.case_rotation import note as rotation_note
 
 CASES = transfer_cases_for_run()
 
@@ -132,6 +136,7 @@ def test_train_transfer(case, shared_page, blocked_guard, widget_guard, request)
             "call",
             "中转查询信息",
             stats["text"]
+            + f"\n本次运行集：{rotation_note('transfer')}"
             + f"\nURL 的 ticketType：{train.url_ticket_type()}"
             + f"\n「指定中转城市」：留空（实测不填可出方案）",
         )

@@ -4,9 +4,12 @@
   1. **只做有登录的测试**，不登录的不测 —— 所以 fixture 从 `page`（匿名 context）
      换成 `shared_page`（session 级、加载合并后的登录态）。顺带把这条轨道并进
      「一次登录跑完」，不再每条用例重开 context。
-  2. **每个功能最多 3 条用例**，只有明确要求全量回归时才跑全部
-     —— 数据仍留在 `data/trains/smoke_cases.yaml`，运行集由
-     `train_smoke_cases_for_run()` 按配额给（当前 3 条，不超配额即等价全量）。
+  2. **每个功能最多 3 条用例**，只有明确要求全量回归时才跑全部。
+
+2026-11-03 用户再裁决：数据准备多条，**每次随机挑 1 条**跑，靠多次运行覆盖全量
+（`utils/case_rotation.py` 的轮换 + 随机，一个 cycle 内不重复）。
+数据仍留在 `data/trains/smoke_cases.yaml`，运行集由 `train_smoke_cases_for_run()` 给；
+要全量用 `E2E_FULL=1`，要复现某条用 `E2E_CASE_ID=<id>`。
 
 断言分三层（对应裁决 D3）：
   结构层：结果条目数 >= min_results
@@ -22,6 +25,7 @@ import pytest
 
 from pages.train_search_page import TrainSearchPage
 from utils.case_data import case_ids, train_smoke_cases_for_run
+from utils.case_rotation import note as rotation_note
 
 # 数据在 data/trains/smoke_cases.yaml（可用 CASE_DATA_DIR 覆盖）。
 CASES = train_smoke_cases_for_run()
@@ -67,6 +71,7 @@ def test_train_search(case, shared_page, blocked_guard, widget_guard, request):
             "call",
             "查询信息",
             f"用例：{case.id}\n区间：{case.from_city}→{case.to_city}\n"
+            f"本次运行集：{rotation_note('train_smoke')}\n"
             f"日期：{case.depart_date}（T+{case.depart_offset_days}）\n"
             f"URL 的 ticketType：{train.url_ticket_type()} / dDate：{train.url_depart_date()}\n"
             f"页面自称车次数：{train.declared_result_count(body)}\n"

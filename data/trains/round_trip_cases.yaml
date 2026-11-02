@@ -11,9 +11,10 @@
 # 返程日历的定位依据见 docs/locator-evidence/FORM-MODE.md
 # （wrap 是 .widget-calendar-back-wrap，**back 不是 return**）。
 #
-# **运行条数（2026-11-02 用户裁决）**：每功能默认最多 3 条，只有明确要求全量回归时
-# 才跑全部 ⇒ 本文件 9 条是数据资产，默认运行集由 utils/case_data.QUOTA_PICK 挑 3 条
-# （跨城+3天 / 长距离+12天夜间 / 同城两站+5天），E2E_FULL=1 才跑全 9 条。
+# **运行条数（2026-11-03 用户裁决）**：数据留多条、**每次随机挑 1 条**跑，靠多次运行
+# 覆盖全量 ⇒ 本文件 9 条是数据资产，运行集由 utils/case_rotation.py 轮换
+# （一个 cycle 内不重复，连跑 9 次必定全部见到，单次只花 1 条的时间）。
+# 要固定某条：E2E_CASE_ID=rt-gz-cs-near；要多条：E2E_CASE_QUOTA=3；要全量：E2E_FULL=1。
 #
 # 字段
 #   id                     用例标识：小写 ASCII slug（进 junit 不能有中文）

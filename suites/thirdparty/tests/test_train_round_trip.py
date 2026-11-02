@@ -6,6 +6,10 @@
 只有回到一级菜单（trains.ctrip.com 首页）才允许用 URL。所以本轨道从"URL 直达结果页"
 改成了"完整走首页表单"，URL 参数只作为**断言依据**（ticketType / dDate / rDate 回读）。
 
+2026-11-03 用户裁决：数据多条，**每次随机挑 1 条**跑，靠多次运行覆盖全量 —— 见
+`utils/case_rotation.py`（轮换 + 随机，一个 cycle 内 9 条不重复）。全量 `E2E_FULL=1`，
+复现某条 `E2E_CASE_ID=rt-…`。
+
 断言分三层（口径与单程一致，维度按往返扩展）：
   结构层：URL 的 ticketType=1、dDate/rDate 真的生效；页面渲染出**两栏**；每栏条数达标
   内容层：每栏都能解析出车次号，覆盖率达标；栏头区间与用例方向一致
@@ -27,6 +31,7 @@ import pytest
 
 from pages.train_search_page import TrainSearchPage
 from utils.case_data import case_ids, round_trip_cases_for_run
+from utils.case_rotation import note as rotation_note
 from utils.round_trip_data import WINDOW_HOURS
 
 CASES = round_trip_cases_for_run()
@@ -115,6 +120,7 @@ def test_train_round_trip(case, shared_page, blocked_guard, widget_guard, reques
             "往返查询信息",
             f"用例：{case.id}（{case.name}）\n"
             f"区间：{case.from_city}→{case.to_city}（{case.city_scope}）\n"
+            f"本次运行集：{rotation_note('round_trip')}\n"
             f"日期：去 {case.depart_date} ~ 回 {case.return_date}（{case.nights} 晚，锚点={case.anchor}）\n"
             f"URL 的 ticketType：{train.url_ticket_type()} / "
             f"dDate：{train.url_depart_date()} / rDate：{train.url_return_date()}\n"
