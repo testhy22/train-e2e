@@ -54,3 +54,58 @@ cases:
     expected:
       http_status: 200
       title_contains: 火车票
+
+  # ---------------------------------------------------------------- 扩池（2026-11-07）
+  #
+  # 为什么加：原三条都是「一线 ↔ 一线」，一轮 3 次跑完；且上海-北京属长干线，
+  # 车次多、渲染重。补的是公交化短途（南京-苏州、成都-重庆、武汉-长沙），
+  # 结果页更轻、也更接近真人日常查询。
+  #
+  # 站名已用只读探针 `tools/probes/probe_city_pool_names.py`（2026-11-07）
+  # 在火车票首页实选过：6/6 命中（其中「苏州」第一次点到了「苏州北」，
+  # 页面对象重选后落回苏州 —— 这是既有重试逻辑，不是新问题）。
+  # 该探针不提交搜索。
+  #
+  # 偏移量必须落在 +3..+15（预售期，见 utils/case_schema.py 的断言）。
+
+  - id: nj-sz
+    name: 南京-苏州 短途
+    from_city: 南京
+    to_city: 苏州
+    depart_offset_days: 4
+    min_results: 1
+    expected_keyword: 车次
+    tags: [pool, short-haul]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: cd-cq
+    name: 成都-重庆 短途
+    from_city: 成都
+    to_city: 重庆
+    depart_offset_days: 8
+    min_results: 1
+    expected_keyword: 车次
+    tags: [pool, short-haul]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+
+  - id: wh-cs
+    name: 武汉-长沙 中途
+    from_city: 武汉
+    to_city: 长沙
+    depart_offset_days: 12
+    min_results: 1
+    expected_keyword: 车次
+    tags: [pool, mid-haul]
+    expected:
+      http_status: 200
+      title_contains: 火车票
+#
+# 偏移量上限的实测修正（2026-11-07）：原本这条写的是 +15，正好压在预售期边界上，
+# 日历格显示「预约」而不是票价 —— 点它**不会改日期**，输入框停在默认值上，
+# 用例报「点选后为 2026-11-10，期望 2026-11-22」。
+# 所以 +3..+15 是 `utils/case_schema.py` 的**数据合法性**上限，
+# 不等于「这站一定可售」；可售窗口按实测约在 +13 以内，这里取 +12。

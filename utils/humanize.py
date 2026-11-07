@@ -28,8 +28,9 @@
 |---|---|---|
 | `pages/hotel_search_page.py` | 已接入 | 16 处（既有）；关遮罩坐标已加抖动 |
 | `pages/flight_search_page.py` | 已接入 | 6 处（既有）；关遮罩坐标已加抖动 |
-| `pages/train_search_page.py` | 已接入 | 8 处（2026-11-02 补齐，含城市项/日历/提交） |
+| `pages/train_search_page.py` | 已接入 | 9 处（2026-11-02 补齐城市项/日历/提交；2026-11-07 日期格改 `move_neutral` + `click_soon`） |
 | `pages/header_account.py` | 已接入 | 悬停多步移动 + 退出点击（非 BasePage 子类，自带 Humanizer） |
+| `pages/base_page.py` `goto()` | 已接入 | 2026-11-07 补 L2：导航后 1–2 次滚动（150–400px）+ 滚动间停顿；**顺序固定为 关浮层 → 滚动 → 读页停顿** |
 | 轮询类 `wait_for_timeout` | 刻意不接入 | 语义是「等条件」不是节奏（边界 3） |
 """
 
@@ -63,12 +64,25 @@ class Rhythm:
     #: 翻月这类**可能连点**的场景：单次停顿压到 150–350ms，避免「翻 3 个月」
     #: 累积成 3×400ms，把节奏拖成另一种机械。
     pagination_settle_ms: tuple[int, int] = (150, 350)
+    #: 指针离开目标后等 hover 态消失的时间（2026-11-07）。
+    #: 用在「悬停本身会触发重绘」的目标上（火车票日历格会刷新票价/余票）：
+    #: 先把指针挪到中性区、等这一段，让上一次 hover 引起的重绘结束，再重新解析目标。
+    hover_clear_ms: tuple[int, int] = (140, 300)
+    #: 移动到位后、按下前的**短**停顿（2026-11-07）。用在同上场景：
+    #: 停得越久，「解析到的 DOM」与「点击落下的瞬间」之间被重绘插队的窗口越大。
+    #: 40–120ms 仍落在人类「定位→按下」的反应区间内，不是瞬点。
+    click_soon_ms: tuple[int, int] = (40, 120)
     #: 两个动作之间的间隔（看完再动）。
     action_gap_ms: tuple[int, int] = (350, 900)
     #: 需要读页面的地方（比如选完日期看摘要）停久一点。
     read_ms: tuple[int, int] = (600, 1300)
     #: 按键（Esc 之类）之后的小停顿。
     key_gap_ms: tuple[int, int] = (120, 320)
+    #: 导航后「扫一眼」的滚动幅度（像素）与两次滚动之间的间隔。
+    #: 幅度取 150–400：低于 150 等于没动，高于 400 会把表单整块推出视口，
+    #: 后续点击要靠 Playwright 自动回滚，反而多出一段不自然的跳转。
+    scroll_px: tuple[int, int] = (150, 400)
+    scroll_gap_ms: tuple[int, int] = (400, 900)
 
 
 DEFAULT_RHYTHM = Rhythm()
@@ -134,6 +148,23 @@ class Humanizer:
         """读完页面上某处信息后的停顿。"""
         self.pause(self.rhythm.read_ms)
 
+    def browse(self) -> None:
+        """导航后「上下扫一眼」：1–2 次小幅滚动，滚动之间停顿。关闭时零开销。
+
+        补的是原先缺的一层：旧版导航后只有 `read()` 一段停顿，鼠标一动不动。
+        真人打开首页会先扫一屏再动手；`wheel` 只改滚动位置，不碰指针与键盘，
+        **不改变浏览器对外暴露的任何身份信息**（边界 1）。
+
+        调用点固定在 `BasePage.goto()`，且**必须在 `dismiss_overlays()` 之后** ——
+        关浮层用的是坐标点击，先滚动会让坐标落到别处。
+        """
+        if self.disabled:
+            return
+        for _ in range(self._rng.randint(1, 2)):
+            delta = self._rng.randint(*self.rhythm.scroll_px) * self._rng.choice((-1, 1))
+            self.page.mouse.wheel(0, delta)
+            self.pause(self.rhythm.scroll_gap_ms)
+
     # ------------------------------------------------------------ 鼠标
     def move_to(self, locator: Locator) -> None:
         """把鼠标按多步移到元素中心。
@@ -168,6 +199,40 @@ class Humanizer:
             return
         self.move_to(locator)
         self.pause(self.rhythm.click_settle_ms)
+        locator.click()
+
+    def move_neutral(self, x: int = 28, y: int = 28, jitter: int = 10) -> None:
+        """把指针挪到视口左上角的中性区，**只移动、不点击**（2026-11-07）。
+
+        用途：消掉上一个目标上的 hover 态。火车票日历鼠标经过某天就会刷新那一列的
+        票价/余票并重绘整块网格（`pages/train_search_page.py` 的既有注释已记），
+        所以「解析日期格 → 点击」之前必须让重绘先结束，否则解析到的格子与点下去的
+        格子可能不是同一块 DOM。
+
+        关闭时退化为一次 `mouse.move`（仍然移动，因为调用方依赖「hover 被清掉」这个
+        副作用，而不只是节奏）。
+        """
+        if self.disabled:
+            self.page.mouse.move(x, y)
+            return
+        self.page.mouse.move(
+            x + self._rng.randint(-jitter, jitter), y + self._rng.randint(-jitter, jitter)
+        )
+        self.pause(self.rhythm.hover_clear_ms)
+
+    def click_soon(self, locator: Locator) -> None:
+        """移动到位后**尽快**点击（40–120ms）。与 `click` 只差停顿时长。
+
+        为什么需要这一档：`click_settle_ms` 的 180–420ms 对普通控件是对的
+        （人有反应时间），但对「悬停即重绘」的目标是风险窗口 —— 鼠标停在格子上
+        越久，越可能等到一次把 DOM 换掉的刷新。这里压到 40–120ms，
+        让「解析到的格子」和「按下的瞬间」落在同一个绘制帧内。
+        """
+        if self.disabled:
+            locator.click()
+            return
+        self.move_to(locator)
+        self.pause(self.rhythm.click_soon_ms)
         locator.click()
 
     def click_quick(self, locator: Locator) -> None:

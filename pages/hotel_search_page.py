@@ -34,6 +34,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
+from utils import throttle
 from utils.logger import logger_info
 
 # 表单根：包含目的地输入框的那个 ul
@@ -325,6 +326,8 @@ class HotelSearchPage(BasePage):
         「搜索行为真的发生了」的外部证据，而不是我们回读自己写进去的值。
         """
         logger_info("[酒店] 点击搜索")
+        # 全局节流：提交搜索是「对外动作」，与上一次导航/提交至少隔 N 秒。
+        throttle.wait_action()
         with self.page.expect_request(
             lambda req: "/hotels/list" in req.url, timeout=settings.NAV_TIMEOUT_MS
         ) as info:
@@ -389,6 +392,8 @@ class HotelSearchPage(BasePage):
             adults=adults,
             children=children,
         )
+        # 直连列表页同样是一次对外导航，一并计入节流。
+        throttle.wait_action()
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
         # 直连列表页同样导航后停一拍（HUMAN=1），与 BasePage.goto 口径一致（边界 3）。

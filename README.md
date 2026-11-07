@@ -408,6 +408,26 @@ E2E_CLEAN_DISABLE=1 python -m pytest   # 完全跳过（要留证据排查时）
 `logs/`、`screenshots/`、`trace/`、`html/` 这四个一级目录即使清空也不删。
 行为由 `tools/tests/test_cleaner.py` 锁死（12 条：过期判定 / 演练 / 禁用 / 项目外拒绝 / 脱敏）。
 
+访问强度（`utils/throttle.py`，三个维度，全部可关）：
+
+```bash
+# 一次只碰一个功能（e2e 串联轨道，收集期裁剪；auto = 每次随机挑一个）
+E2E_MODULES=trains python -m pytest suites/e2e
+E2E_MODULES=auto  HEADED=1 python -m pytest suites/e2e/tests/test_search_chain.py
+
+# 动作间隔 15s / 用例间隔 30s / 每小时最多 5 次搜索（跨运行，落盘 .e2e-state/quota.json）
+E2E_MIN_ACTION_INTERVAL_S=15 E2E_CASE_GAP_S=30 E2E_HOURLY_QUOTA=5 python -m pytest suites/e2e
+E2E_QUOTA_WAIT=1 python -m pytest suites/e2e   # 超额时真等到窗口滑出（默认是 skip）
+E2E_THROTTLE=0 python -m pytest                 # 整体关闭（只建议在跳板机上调功能时用）
+```
+
+超额默认 `pytest.skip("quota: …")` 而不是硬等：等一小时只会被 job 级超时砍掉，还占着 runner。
+配额是「跨运行」的，因为动作间隔管不住「CI 每 10 分钟跑一轮」这种聚集。
+
+**红线**：`tools/tests/test_no_stealth.py` 会扫全仓 —— `add_init_script`、`user_agent=`、
+改写 `navigator.webdriver`、打码平台、`AutomationControlled` 启动参数一律判红。
+只读取证（`page.evaluate("() => navigator.webdriver")`）不算违规。
+
 ## 十一、Allure 报告（项目级看板）
 
 pytest-html 只够单次结果展示：扁平列表、没有步骤、没有历史。Allure 补的正是这三块。

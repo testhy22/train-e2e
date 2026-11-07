@@ -93,3 +93,89 @@ cases:
     tags: [cross-month, bj]
     expected:
       city_id: 1
+
+  # ---------------------------------------------------------------- 扩池（2026-11-07）
+  #
+  # 为什么加：原池只有上海/北京/广州三条 + 一条北京远期，每条轨道跑一次只抽 1 条，
+  # 一轮只要 4 次就跑完，等于「城市维度几乎没覆盖」，也容易在同一个城市反复触发。
+  #
+  # city_id 全部**实测**，不是查表也不是推的：探针 `tools/probes/probe_city_pool.py`
+  # （2026-11-07）从酒店目的地联想接口 `gaHotelSearchEngine` 的 `searchResults[].cityId`
+  # 取值，并先用已知城市做口径校验 —— 上海/北京/广州 取回 2 / 1 / 32，与 2026-11-01
+  # 的实测值一致，说明取到的是同一套 id，才采信新城市的数值。
+  # 报告：reports/probe_city_pool/20261107-120947/facts.json
+  #
+  # 偏移量刻意错开（5/9/16/20/26/33），避免六条数据永远落在同一星期几、
+  # 也避免全部落在「当前可见两个月」里 —— 认领翻月分支的仍是上面那条 T+45。
+
+  - id: cd-2n1r1a
+    name: 成都-2晚1间1位
+    city: 成都
+    checkin_offset_days: 5
+    nights: 2
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [pool, cd]
+    expected:
+      city_id: 28
+
+  - id: sz-1n1r1a
+    name: 深圳-1晚1间1位
+    city: 深圳
+    checkin_offset_days: 9
+    nights: 1
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [pool, sz]
+    expected:
+      city_id: 30
+
+  - id: hz-3n1r2a
+    name: 杭州-3晚1间2位
+    city: 杭州
+    checkin_offset_days: 16
+    nights: 3
+    rooms: 1
+    adults: 2
+    children: 0
+    tags: [pool, hz]
+    expected:
+      city_id: 17
+
+  - id: xa-2n2r2a
+    name: 西安-2晚2间2位
+    city: 西安
+    checkin_offset_days: 20
+    nights: 2
+    rooms: 2
+    adults: 2
+    children: 0
+    tags: [pool, xa]
+    expected:
+      city_id: 10
+
+  - id: nj-1n1r1a
+    name: 南京-1晚1间1位
+    city: 南京
+    checkin_offset_days: 26
+    nights: 1
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [pool, nj]
+    expected:
+      city_id: 12
+
+  - id: cq-2n1r1a
+    name: 重庆-2晚1间1位
+    city: 重庆
+    checkin_offset_days: 33
+    nights: 2
+    rooms: 1
+    adults: 1
+    children: 0
+    tags: [pool, cq]
+    expected:
+      city_id: 4

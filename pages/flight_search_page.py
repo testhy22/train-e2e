@@ -44,6 +44,7 @@ from playwright.sync_api import Locator
 
 from config import settings
 from pages.base_page import BasePage
+from utils import throttle
 from utils.city_input import CityPicker, select_city_by_click
 from utils.logger import logger_info, logger_warning
 
@@ -343,6 +344,8 @@ class FlightSearchPage(BasePage):
         """点搜索并等落进 `/online/list/`。返回是否落进去了。"""
         self.human.think()
         logger_info("[机票] 点击搜索")
+        # 全局节流：提交是对外动作，与上一次导航/提交至少隔 N 秒。
+        throttle.wait_action()
         self.human.click(self.page.locator(self.SEARCH_BTN).first)
         try:
             self.page.wait_for_url(re.compile(r"/online/list/"), timeout=settings.NAV_TIMEOUT_MS)

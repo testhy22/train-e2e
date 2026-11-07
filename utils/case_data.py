@@ -147,6 +147,24 @@ def take_quota(kind: str, cases: list) -> list:
     return case_rotation.pick(kind, cases)
 
 
+def hotel_cases_for_run(
+    path: str | Path | None = None, today: date | None = None
+) -> list[hotel_data.HotelCase]:
+    """酒店的**本次运行集**：默认 1 条（数据共 4 条，跑 4 次覆盖一轮）。
+
+    与 `load_hotel_search_cases()` 并存：那个是**全量**，供数据校验与单测使用；
+    用例参数化改用本函数，才能落实「每次每功能只跑 1 条」（2026-11-03 裁决）。
+    """
+    return take_quota("hotels", load_hotel_search_cases(path, today))
+
+
+def flight_cases_for_run(
+    path: str | Path | None = None, today: date | None = None
+) -> list[flight_data.FlightCase]:
+    """机票的**本次运行集**：默认 1 条（数据共 5 条，跑 5 次覆盖一轮）。"""
+    return take_quota("flights", load_flight_cases(path, today))
+
+
 def round_trip_cases_for_run(
     path: str | Path | None = None, today: date | None = None
 ) -> list[round_trip_data.RoundTripCase]:

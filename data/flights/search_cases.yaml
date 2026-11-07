@@ -76,3 +76,52 @@ cases:
     adults: 1
     tags: [cross-month]
     expected: {}
+
+  # ---------------------------------------------------------------- 扩池（2026-11-07）
+  #
+  # 为什么加：原五条里三条是「一线 ↔ 一线/西南」，城市池实际只有 7 个，
+  # 轮换一轮只要 5 次。加的是**区域枢纽**之间的航线（避开京沪这类被重点盯的干线），
+  # 让「每次只跑 1 条」在多次运行后能铺到不同城市对。
+  #
+  # 城市名已用只读探针 `tools/probes/probe_city_pool_names.py`（2026-11-07）
+  # 在机票首页逐一实选过：全部命中联想面板并回填（8/8 OK，未通过 0 个）。
+  # 该探针**不提交搜索**，只做城市选择。
+  # 报告：reports/probe_city_pool_names/20261107-121315/facts.json
+  #
+  # expected 仍留空：三字码没实测就不写（理由见文件头）。
+
+  - id: taq-csx
+    name: 青岛-长沙 单程
+    from_city: 青岛
+    to_city: 长沙
+    depart_offset_days: 9
+    adults: 1
+    tags: [pool, regional]
+    expected: {}
+
+  - id: cgo-kmg
+    name: 郑州-昆明 单程
+    from_city: 郑州
+    to_city: 昆明
+    depart_offset_days: 12
+    adults: 1
+    tags: [pool, regional]
+    expected: {}
+
+  - id: wuh-xmn
+    name: 武汉-厦门 单程
+    from_city: 武汉
+    to_city: 厦门
+    depart_offset_days: 18
+    adults: 1
+    tags: [pool, regional]
+    expected: {}
+
+  - id: ctu-kwe
+    name: 成都-贵阳 单程（区域短途）
+    from_city: 成都
+    to_city: 贵阳
+    depart_offset_days: 24
+    adults: 1
+    tags: [pool, regional]
+    expected: {}

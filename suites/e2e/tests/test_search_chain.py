@@ -1,5 +1,6 @@
 """跨模块串联：**一次登录、一个浏览器、一个 context、一个 page**，
-依次跑完 酒店 → 火车 → 机票，每模块多组数据，单条失败不中断后续。
+依次跑完 酒店 → 火车 → 机票，**每模块默认 1 组数据**（轮换 + 随机，`E2E_FULL=1` 放开全量），
+单条失败不中断后续。
 
 与既有三条轨道的关系（不替代，也不合并）：
 
@@ -15,7 +16,7 @@
 `ui` / `ui_hotels` 的 ratio 序列会一起变成「今天扫没扫码 + 上一轮留下的状态」，
 K-04 / K-05 的结论也就不可比了。
 
-本轨道要暴露的是另一类问题：**状态疲劳**（连搜九次之后页面还能不能正常响应）、
+本轨道要暴露的是另一类问题：**状态疲劳**（连续多组搜索之后页面还能不能正常响应）、
 **浮层累积**（每站都弹一次营销层，叠到第三站会不会挡住控件）、
 **page 崩溃后的恢复**（某站超时把 page 打死，下一站还能不能跑）。
 这些只有「共享会话 + 连续多组」才测得出来。
@@ -34,18 +35,21 @@ from utils.waf import check_waf_block
 from pages.base_page import BasePage
 from utils.case_data import (
     case_ids,
-    load_flight_cases,
-    load_hotel_search_cases,
-    load_train_smoke_cases,
+    flight_cases_for_run,
+    hotel_cases_for_run,
+    train_smoke_cases_for_run,
 )
 from utils import discover
 from utils.search_flow import SearchOutcome, search_flight, search_hotel, search_train
 
 pytestmark = [pytest.mark.e2e]
 
-HOTELS = load_hotel_search_cases()
-TRAINS = load_train_smoke_cases()
-FLIGHTS = load_flight_cases()
+# 本次运行集：**每个功能默认只挑 1 条**（轮换 + 随机，用户 2026-11-03 裁决）。
+# 要跑全量用 E2E_FULL=1；要复现某条用 E2E_CASE_ID=<id>；要一次挑多条用 E2E_CASE_QUOTA=<n>。
+# 为什么在 loader 层裁：参数化在 import 期就要定列表，命令行过滤报告里看不见。
+HOTELS = hotel_cases_for_run()
+TRAINS = train_smoke_cases_for_run()
+FLIGHTS = flight_cases_for_run()
 
 
 # ---------------------------------------------------------------- 公共断言与取证

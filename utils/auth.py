@@ -258,3 +258,41 @@ def merged_storage_state(primary: Path, extra: Path | None = None) -> dict[str, 
     state = {"cookies": cookies, "origins": origins}
     state["_merged"] = merged_flag           # 仅用于日志，Playwright 不认这个键
     return state
+
+
+def cookie_expiry_report(state: dict[str, Any]) -> dict[str, Any]:
+    """统计合并后 cookies 的到期分布（2026-11-07，配合「定期刷新登录态」）。
+
+    为什么要看这个：`len(cookies)=39` 只能说明「带了多少条」，说明不了「还能用多久」。
+    站点侧会话过期与「临期凭据持续请求」都可能让搜索退化成登录墙，
+    而登录墙在用例里看起来就像「页面结构变了」。所以每轮 e2e 开跑时把
+    最早到期时间写进日志，快到期时给出明确警告，而不是等人去猜。
+
+    返回：`{"total", "session", "earliest_days", "earliest_name"}`。
+    `session` 是没有 expires 的会话 cookie 条数（关闭浏览器即失效，不算临期）。
+    """
+    import time as _time
+
+    total = 0
+    session = 0
+    earliest_days: float | None = None
+    earliest_name = ""
+    now = _time.time()
+    for c in state.get("cookies") or []:
+        total += 1
+        expires = c.get("expires")
+        if not expires or float(expires) <= 0:
+            session += 1
+            continue
+        days = (float(expires) - now) / 86400
+        if days < 0:
+            continue
+        if earliest_days is None or days < earliest_days:
+            earliest_days = days
+            earliest_name = str(c.get("name", ""))
+    return {
+        "total": total,
+        "session": session,
+        "earliest_days": earliest_days,
+        "earliest_name": earliest_name,
+    }

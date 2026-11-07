@@ -33,6 +33,7 @@ from utils.diagnostics import instrument_page
 from utils.humanize import Humanizer, human_enabled
 from utils.logger import logger_info
 from utils.overlay import dismiss_promo_overlays
+from utils import throttle
 
 # ---------------------------------------------------------------- 风控特征
 
@@ -142,11 +143,17 @@ class BasePage:
         """打开页面并等载入完成。不传 path 时打开站点根。"""
         url = self.base_url + ("" if path == "/" else path)
         logger_info(f"[{self.__class__.__name__}] 打开 {url}")
+        # 全局节流：两次导航之间至少隔 E2E_MIN_ACTION_INTERVAL_S（默认 15s）。
+        # 这是「动作之间」的空档，不是等待条件 —— 下面的 wait_ready 一个字没动。
+        throttle.wait_action()
         self.page.goto(url, wait_until="domcontentloaded")
         self.wait_ready()
+        # 关浮层必须在滚动之前：dismiss_overlays 用的是坐标点击，先滚会把坐标挪到别处。
         self.dismiss_overlays()
-        # HUMAN=1 时导航后停一拍（600–1300ms），打散「加载完立刻操作」的机器节奏；
-        # 关闭时零开销。这是动作间停顿，不替代上面的 wait_ready 与后续 expect（边界 3）。
+        # HUMAN=1 时导航后「像人一样扫一眼」：1–2 次小幅滚动 + 滚动间停顿；
+        # 随后再停一拍（600–1300ms），打散「加载完立刻操作」的机器节奏。
+        # 关闭时两者都是零开销。都是动作间停顿，不替代上面的 wait_ready 与后续 expect（边界 3）。
+        self.human.browse()
         self.human.read()
         logger_info(f"[{self.__class__.__name__}] 已载入 title={self._safe_title()!r}")
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import random
 import re
 import time
 import warnings
@@ -26,8 +27,8 @@ from playwright.sync_api import Browser, BrowserContext, Page
 from config import settings
 from pages.base_page import BasePage, BlockedByAntiBot, BlockSignal
 from pages.train_search_page import WidgetUnavailable
-from utils import allure_support
-from utils.auth import merged_storage_state
+from utils import allure_support, throttle
+from utils.auth import cookie_expiry_report, merged_storage_state
 from utils.cleaner import clean_old_reports
 from utils.waf import check_waf_block as _check_waf_block
 from utils.diagnostics import diagnostics_of, forget_page, instrument_page
@@ -169,6 +170,114 @@ def _allure_labels(request: pytest.FixtureRequest) -> None:
         story=story,
         severity="CRITICAL" if scope == "ui_e2e" else "NORMAL",
     )
+
+
+# ---------------------------------------------------------------- 全局节流
+
+#: 这些标记的用例会驱动真站点。只有它们之间才需要「用例间隔」——
+#: 门禁单测（tools/tests）不联网，套上 30s 间隔会让 225 条跑成两小时。
+_BROWSER_MARKERS = {"ui", "hotels", "auth", "e2e"}
+
+#: e2e 串联轨道里「一个功能」对应的用例名前缀。用前缀而不是 marker：
+#: 这三条本来就共用一个 page，拆分只在**收集期**做，不动用例语义。
+_E2E_MODULE_CASE = {
+    "hotels": "chain_hotels",
+    "flights": "chain_flights",
+    "trains": "chain_trains",
+}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """`E2E_MODULES`：让一次运行只碰一个功能（2026-11-07 用户要求）。
+
+    为什么在收集期裁、不用 marker 过滤：`-k`/`-m` 也能达到同样效果，但**默认值**没人记得设。
+    这里给的是「一次运行 = 一个功能」的开关，`E2E_MODULES=auto` 每次随机挑一个，
+    配合 `utils/throttle` 的每小时配额，把「跨运行的聚集请求」压到最低。
+
+    取值：
+      `all` / `1`           全量串行（默认行为，等价于不设）
+      `auto` / `one`        随机挑一个功能
+      `hotels,trains`       指定子集（逗号分隔）
+
+    只影响 e2e 串联轨道（`test_search_chain.py` 的三条 `chain_*`），其余用例原样保留。
+    """
+    raw = os.getenv("E2E_MODULES", "").strip().lower()
+    if not raw or raw in {"all", "1", "full"}:
+        return
+    if raw in {"auto", "one", "random"}:
+        selected = {random.choice(sorted(_E2E_MODULE_CASE))}
+    else:
+        selected = {x.strip() for x in raw.split(",") if x.strip()}
+        unknown = selected - set(_E2E_MODULE_CASE)
+        if unknown:
+            raise pytest.UsageError(
+                f"E2E_MODULES 里有未知功能 {sorted(unknown)}；"
+                f"可用：{sorted(_E2E_MODULE_CASE)} 或 all/auto"
+            )
+
+    keep, dropped = [], []
+    for item in items:
+        name = getattr(item, "name", "")
+        # item.name 是「函数名[参数]」，函数名带 test_ 前缀，参数里也可能出现 chain_ 字样，
+        # 所以按「test_<前缀>[」匹配，别用 `in`（会误伤参数化 id）。
+        module = next(
+            (m for m, prefix in _E2E_MODULE_CASE.items() if name.startswith(f"test_{prefix}[")),
+            None,
+        )
+        if module is None or module in selected:
+            keep.append(item)
+        else:
+            dropped.append(item)
+
+    if dropped:
+        get_logger().info(
+            "E2E_MODULES=%s ⇒ 本次只跑 %s，剔除 %d 条：%s",
+            raw, sorted(selected), len(dropped), [i.name for i in dropped],
+        )
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = keep
+
+
+@pytest.fixture(autouse=True)
+def _global_case_throttle(request: pytest.FixtureRequest) -> None:
+    """浏览器用例之间的强制间隔（默认 30s，`E2E_CASE_GAP_S` 可调）。
+
+    为什么是 fixture 而不是每条用例里写 sleep：
+      · 用例顺序由 pytest 决定，写在哪条里都会漏；
+      · 首条用例不能等（前面没有「上一个请求」），只有 fixture 知道是不是首条。
+
+    为什么只管浏览器用例：门禁单测不产生网络请求，给它们加间隔纯属拖慢反馈。
+    判定用 marker 而不是「有没有 page fixture」—— 后者在用例还没请求 fixture 时
+    拿不到，而 marker 在收集期就定了。
+
+    与 `utils/throttle.wait_action()` 分工：
+      这里管**用例之间**（30s），那边管**动作之间**（15s，挂在 BasePage.goto 与各站提交上）。
+    """
+    if not throttle.enabled():
+        yield
+        return
+    if not ({m.name for m in request.node.iter_markers()} & _BROWSER_MARKERS):
+        yield
+        return
+
+    # 跨运行配额（2026-11-07）：一条浏览器用例 = 一次搜索请求。
+    # 超额默认 **skip 而不是硬等** —— 等一个小时的 CI job 只会被 job 级超时砍掉，
+    # 还占着 runner；跳过的语义是「本小时额度用完，这次不跑」，报告里能看见原因。
+    # 想真等就设 E2E_QUOTA_WAIT=1（打印等待秒数后 sleep 到窗口滑出）。
+    try:
+        throttle.reserve_search()
+    except throttle.QuotaExhausted as exc:
+        if os.getenv("E2E_QUOTA_WAIT", "").strip() in {"1", "true", "yes", "on"}:
+            get_logger().warning("[throttle] %s；按 E2E_QUOTA_WAIT=1 等待", exc)
+            time.sleep(exc.wait_s + 1)
+            throttle.reserve_search()
+        else:
+            get_logger().warning("[throttle] %s；本条跳过", exc)
+            pytest.skip(f"quota: {exc}")
+
+    throttle.wait_case_gap()
+    yield
+    throttle.mark_case_end()
 
 
 # ---------------------------------------------------------------- 浏览器上下文
@@ -477,13 +586,36 @@ def shared_context(browser: Browser) -> BrowserContext:
     trains_state = settings.auth_state_path("trains")
     merged = merged_storage_state(state, trains_state)
     was_merged = bool(merged.pop("_merged", False))
+    expiry = cookie_expiry_report(merged)
     get_logger().info(
-        "共享会话登录态：%s + %s ⇒ cookies=%d（跨站合并=%s）",
+        "共享会话登录态：%s + %s ⇒ cookies=%d（跨站合并=%s）｜会话 cookie %d 条｜"
+        "最早到期 %s（%s）",
         state.name,
         trains_state.name if was_merged else "(缺失，火车票将未登录)",
         len(merged["cookies"]),
         "是" if was_merged else "否",
+        expiry["session"],
+        f"{expiry['earliest_days']:.1f} 天" if expiry["earliest_days"] is not None else "无持久 cookie",
+        expiry["earliest_name"] or "-",
     )
+    # 临期告警（2026-11-07）：站点对「临期凭据持续请求」不友好，且过期后搜索会
+    # 退化成登录墙 —— 那在报告里长得像「页面结构变了」。默认阈值 2 天。
+    if expiry["earliest_days"] is not None and expiry["earliest_days"] < 2:
+        get_logger().warning(
+            "登录态即将过期（最早 %.1f 天，cookie=%s）；请重跑 "
+            "`python scripts/setup_auth.py --yes`（www）与 `--entry trains`（火车票）",
+            expiry["earliest_days"],
+            expiry["earliest_name"],
+        )
+    if trains_state.exists():
+        trains_age = (time.time() - trains_state.stat().st_mtime) / 86400
+        if trains_age > settings.AUTH_STATE_TTL_DAYS:
+            get_logger().warning(
+                "火车票登录态已存放 %.1f 天（> %d 天阈值）；按 K-07 它只影响登录指示，"
+                "不影响搜索，但建议顺手用 `--entry trains` 刷新",
+                trains_age,
+                settings.AUTH_STATE_TTL_DAYS,
+            )
     context = browser.new_context(**{**_common_context_args(), "storage_state": merged})
     if os.getenv("E2E_TRACE") == "1":
         try:
