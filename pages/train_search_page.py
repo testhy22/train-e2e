@@ -18,6 +18,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from config import settings
 from pages.base_page import BasePage
+from utils import throttle
 from utils.logger import logger_info
 
 
@@ -527,14 +528,35 @@ class TrainSearchPage(BasePage):
             ) from exc
 
         self._goto_month(target_month, which)
+
+        # 点之前先记基线值，失败时能区分「从来没变」和「变了又被改回去」。
+        box = self.page.locator(self.DATE_INPUT[which])
+        before = box.input_value().strip()
         self._click_day(target_month, target_day, which)
 
+        # 点完**回读校验**，不生效就报错 —— **不重复点击**（2026-11-07 用户裁决）。
+        # 旧版在这里「重点一次格子」：实测该分支从未触发过（全部运行日志里
+        # 「重点一次」出现 0 次，而真正失败的那两次是直接读出错值），
+        # 也就是说它没救过任何一次，却留下「对同一个死靶子连击」这种典型机器特征。
+        # 正确处置：点一次 → 校验 → 不过就带着诊断信息失败，让人去看页面到底怎么了。
+        try:
+            expect(box).to_have_value(target_date, timeout=2500)
+        except AssertionError as exc:
+            raise WidgetUnavailable(
+                f"{label}点选后为 {box.input_value().strip()!r}，期望 {target_date!r}"
+                f"（点击前 {before!r}，点的是 {target_month} {target_day} 日）"
+            ) from exc
+
         # 关掉日历（遮罩不关会拦住搜索按钮）
-        self._close_calendar()
+        self._close_calendar(which)
 
         actual = self.page.locator(self.DATE_INPUT[which]).input_value().strip()
         if actual != target_date:
-            raise WidgetUnavailable(f"{label}点选后为 {actual!r}，期望 {target_date!r}")
+            raise WidgetUnavailable(
+                f"{label}点选后为 {actual!r}，期望 {target_date!r}"
+                f"（点击前 {before!r}，点的是 {target_month} {target_day} 日；"
+                f"这次差异出现在**关闭日历之后**，属 K-14）"
+            )
         self._log(
             "日期控件（日历弹层）",
             f"含「{word}」的 div.date → {wrap} 内 ul.date-bd li>strong",
@@ -611,41 +633,194 @@ class TrainSearchPage(BasePage):
                 f"{month_label} 没有对应的日期格（标题 {heads.count()} 个，日期栏 {bodies.count()} 个）"
             )
 
-        cells = bodies.nth(index).locator(self.CALENDAR_DAY)
+        body = bodies.nth(index)
         want_day = _norm(day)
-        for i in range(cells.count()):
-            label = cells.nth(i).locator(self.CALENDAR_DAY_LABEL).first
-            if not label.count():
-                continue
-            if _norm(label.inner_text()) == want_day:
-                self.human.click(cells.nth(i))
-                return
-        raise WidgetUnavailable(f"{month_label} 里找不到 {day} 日")
 
-    def _close_calendar(self) -> None:
+        # 先把指针挪开，让上一次 hover 引起的重绘结束（2026-11-07 加）。
+        # 为什么必须在解析格子**之前**：日历格悬停会刷新票价/余票并重绘网格，
+        # 指针如果还停在日历上，重绘就可能在「解析」与「点击」之间插队 ——
+        # 实测两次点错日期（11-14→11-17、11-15→11-17）都发生在这种情形下。
+        self.human.move_neutral()
+
+        # **按内容定位，不按位置定位**（2026-11-07 改）。
+        # 旧写法是 `cells.nth(i)`：先遍历读出「第 i 个格子的数字」，再回手点 nth(i)。
+        # 这两步之间日历可能重绘（鼠标经过就会刷新价格/余票），重绘后同一个**位置**
+        # 可能已经是另一天 —— 实测踩到：目标 11-15 落成 11-17（同日同用例单跑不复现，
+        # 只在「共享 page + 上一个模块刚跑完」时出现）。
+        # `li:has(strong:text-is('15'))` 每次点击前按内容重新解析，重绘也不影响。
+        cell = body.locator(
+            f"{self.CALENDAR_DAY}:has({self.CALENDAR_DAY_LABEL}:text-is('{want_day}'))"
+        )
+        if not cell.count():
+            raise WidgetUnavailable(f"{month_label} 里找不到 {day} 日")
+        target = cell.first
+        cell_text = target.inner_text() or ""
+        logger_info(f"[火车票] 点 {month_label} {day} 日 → {cell_text!r}")
+        # 未开售的日期格显示「预约」而不是票价：点它不会改日期，输入框停在默认值，
+        # 后面只会得到「点选后为 X，期望 Y」这种说不清原因的报错。
+        # 实测 2026-11-07：T+15 正好压在预售期边界，落在这里。
+        if "预约" in cell_text:
+            raise WidgetUnavailable(
+                f"{month_label}{day} 日尚未开售（日历格显示「预约」），无法选中；"
+                f"请把 depart_offset_days 收进可售窗口（实测 +13 以内）"
+            )
+
+        # 点之前先验「这个坐标上最上层的是谁」（2026-11-07 加）。
+        # 为什么不能只靠 `locator.click()`：它自带「元素可接收事件」检查，但通过标准是
+        # 「命中的元素在目标**内部**」。实测失败现场（面板自动关闭、日期仍为默认值）说明
+        # 命中的是**面板外**（遮罩），而那种情况 click 不会拦 —— 点完只留下「值没变」。
+        # 这里自己看一眼：命中的不是这一格就**不点**，等重绘后重新解析（最多 3 轮）。
+        # 注意这不是「连击」：3 轮里最多点 **1** 次，前 2 轮只重新解析、不产生点击。
+        last_hit = ""
+        for attempt in range(3):
+            hit = self._hit_test(target)
+            if hit is True:
+                break
+            if hit is None:            # 取不到坐标：交给 click 用 Playwright 自己的错误说清楚
+                break
+            last_hit = hit
+            logger_info(f"[火车票] 目标格未就位（第 {attempt + 1} 轮）：命中 {hit}，重解析后再点")
+            self.human.pause(self.human.rhythm.hover_clear_ms)
+            cell = body.locator(
+                f"{self.CALENDAR_DAY}:has({self.CALENDAR_DAY_LABEL}:text-is('{want_day}'))"
+            )
+            if not cell.count():
+                raise WidgetUnavailable(f"{month_label} 里找不到 {day} 日（重解析后消失）")
+            target = cell.first
+        else:
+            raise WidgetUnavailable(
+                f"{month_label}{day} 日的格子被其它元素压住（命中「{last_hit}」），"
+                f"不盲点；请检查日历是否被浮层/遮罩盖住"
+            )
+
+        self.human.click_soon(target)
+
+    def _hit_test(self, target: Locator) -> "bool | str | None":
+        """看 `target` 中心坐标上最上层的元素是不是**这一格**。
+
+        返回：`True` 是同一格；`str` 是命中的别的元素（人可读描述，用于报错）；
+        `None` 表示取不到坐标（元素没布局，交给 click 自己失败）。
+        比较用 `getBoundingClientRect()` 与 Playwright 的 `bounding_box()` 对齐 ——
+        两者都是视口坐标，容差 2px 覆盖亚像素取整。
+        """
+        box = target.bounding_box()
+        if not box:
+            return None
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        if x < 0 or y < 0:
+            return f"目标在视口外（{x:.0f},{y:.0f}）"
+        result = self.page.evaluate(
+            """([x, y, tx, ty, tw, th]) => {
+                const el = document.elementFromPoint(x, y);
+                if (!el) return { same: false, desc: 'null' };
+                const li = el.closest('li');
+                const own = el.tagName + '.' + String(el.className || '').slice(0, 28);
+                if (!li) return { same: false, desc: own };
+                const text = (li.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 20);
+                const desc = 'li[' + text + '] ← ' + own;
+                const r = li.getBoundingClientRect();
+                const same = Math.abs(r.x - tx) < 2 && Math.abs(r.y - ty) < 2
+                          && Math.abs(r.width - tw) < 2 && Math.abs(r.height - th) < 2;
+                return { same, desc };
+            }""",
+            [x, y, box["x"], box["y"], box["width"], box["height"]],
+        )
+        if not isinstance(result, dict):
+            return None
+        if result.get("same"):
+            return True
+        return str(result.get("desc") or "unknown")
+
+    def _close_calendar(self, which: str = "depart") -> None:
         """关日历遮罩。选完日期后 widget 通常自己就关了，所以先判在不在。
 
         2026-11-01 实测踩到：单日选择完成后遮罩会被整个摘除，此时再 click 会一直等
         「waiting for locator(...)」直到 15s 超时 —— 关一个已经不在的东西不该算失败。
-        只有「遮罩确实还在且关不掉」才算控件问题，抛 WidgetUnavailable。
+
+        2026-11-07 修（这是 K-14「点了 A 落到 B」的真因）：
+          旧实现 `mask.click(force=True)` 点的是**遮罩中心**，而遮罩中心正好压在日历面板上，
+          `force=True` 又跳过了命中校验 ⇒ 这一下实际点在**面板内部的日期格**上，
+          把刚选好的日期改成别的天。
+          证据：三次失败的报错文本都来自**关闭后的复查**（`select_date` 里第一次回读拿到的是
+          目标值，报错那句不带「点击前 …」），也就是「点对了 → 关日历时被改掉」。
+          现在的做法：① 先给它 800ms 自己关；② 关不掉就在**遮罩上、面板外**找一个点，
+          用**普通点击**（不 force）关，让遮罩自己收到这次点击；③ 还不行再按 Esc。
         """
         mask = self.page.locator(self.CALENDAR_MASK).first
         try:
             if not mask.is_visible():
                 return
-            mask.click(force=True, timeout=3000)
         except (AssertionError, PlaywrightTimeout):
-            pass  # 检查与点击之间被摘除，属于正常时序；下面统一判定
+            return
+
+        # ① 点完日期后通常自动关闭，先等一段，别急着补点击
         try:
-            expect(mask).to_be_hidden(timeout=settings.EXPECT_TIMEOUT_MS)
+            expect(mask).to_be_hidden(timeout=800)
+            return
+        except AssertionError:
+            pass
+
+        # ② 面板还在：点遮罩上、面板外的位置（点面板内部会改日期）
+        point = self._point_outside_panel(which)
+        if point is not None:
+            logger_info(f"[火车票] 日历未自动关闭，点面板外 ({point[0]}, {point[1]})")
+            self.page.mouse.click(point[0], point[1])
+            try:
+                expect(mask).to_be_hidden(timeout=settings.EXPECT_TIMEOUT_MS)
+                return
+            except AssertionError:
+                pass
+
+        # ③ 兜底：Esc
+        logger_info("[火车票] 点面板外仍未关闭，按 Esc")
+        self.page.keyboard.press("Escape")
+        try:
+            expect(mask).to_be_hidden(timeout=1500)
         except AssertionError as exc:
             raise WidgetUnavailable(
-                f"日历遮罩 {self.CALENDAR_MASK} 关不掉，会拦住搜索按钮"
+                f"日历遮罩 {self.CALENDAR_MASK} 关不掉（已试过点面板外与 Esc），会拦住搜索按钮"
             ) from exc
+
+    def _point_outside_panel(self, which: str) -> "tuple[int, int] | None":
+        """在遮罩上找一个**不落在日历面板里**的坐标，找不到返回 None。
+
+        做法不是猜：把面板矩形交给页面，按「面板上/下方各 16px、视口四角与左右中点」
+        生成候选点，再用 `elementFromPoint` 挑第一个**最上层确实是遮罩**的点。
+        之所以要验层级：面板可能比视口还宽/高（贴边布局），单纯算几何会算到面板里。
+        """
+        panel = self.page.locator(f"{self.CALENDAR[which]} {self.CALENDAR_READY}").first
+        box = panel.bounding_box()
+        point = self.page.evaluate(
+            """(box) => {
+                const vw = window.innerWidth, vh = window.innerHeight;
+                const cands = [];
+                if (box) {
+                    const cx = Math.round(box.x + box.width / 2);
+                    cands.push([cx, Math.max(8, Math.round(box.y - 16))]);
+                    cands.push([cx, Math.min(vh - 8, Math.round(box.y + box.height + 16))]);
+                }
+                cands.push([8, 8], [vw - 8, 8], [8, vh - 8], [vw - 8, vh - 8],
+                           [8, Math.round(vh / 2)], [vw - 8, Math.round(vh / 2)]);
+                for (const [x, y] of cands) {
+                    const el = document.elementFromPoint(x, y);
+                    if (el && String(el.className || '').includes('widget-calendar-mask')) {
+                        return [x, y];
+                    }
+                }
+                return null;
+            }""",
+            box,
+        )
+        if isinstance(point, list) and len(point) == 2:
+            return int(point[0]), int(point[1])
+        return None
 
     def submit(self) -> None:
         """点搜索并等结果页。"""
         logger_info("[火车票] 点击搜索并等待结果页")
+        # 全局节流：提交是对外动作，与上一次导航/提交至少隔 N 秒。
+        throttle.wait_action()
         self.human.click(self.search_button())
         self.page.wait_for_url(re.compile(r"/webapp/train/list"), timeout=settings.NAV_TIMEOUT_MS)
         self.wait_ready()
